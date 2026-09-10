@@ -377,7 +377,80 @@ async function main() {
     )
     record('地图上渲染出标记点', markerCount > 0, `共 ${markerCount} 个标记节点`)
 
-    console.log('\n=== 7. 页面运行时报错检查 ===')
+    console.log('\n=== 7. 个人设置页：模型配置与密钥保护 ===')
+    await goto(`${APP_BASE}/settings`)
+    await evaluate(HELPERS)
+    await waitFor(`window.__has('模型配置')`, '设置页表单渲染', 20000)
+
+    const defaultBaseUrl = await evaluate(
+      `(document.querySelector('input[data-testid="model-base-url"]') || {}).value || ''`,
+    )
+    record('默认带出 DeepSeek 接口地址', defaultBaseUrl === 'https://api.deepseek.com/v1', defaultBaseUrl)
+
+    const defaultModel = await evaluate(
+      `(document.querySelector('input[data-testid="model-name"]') || {}).value || ''`,
+    )
+    record('默认带出模型名称', defaultModel === 'deepseek-chat', defaultModel)
+
+    // 用一个明显是假的 Key 走完整保存流程，只验证「加密落库 + 只回掩码」这条链路
+    const fakeKey = 'sk-smoke0000111122223333abcdef'
+    const filledKey = await evaluate(
+      `window.__setInput('input[data-testid="model-api-key"]', ${JSON.stringify(fakeKey)})`,
+    )
+    record('在设置页填入测试用 API Key', filledKey === true)
+
+    const savedModel = await evaluate(`window.__clickButton('保存配置')`)
+    record('点击「保存配置」', savedModel === true)
+
+    await waitFor(
+      `(document.querySelector('[data-testid="key-badge"]')||{}).textContent === '已配置'`,
+      '保存后状态变为已配置',
+      20000,
+    )
+    record('保存后标记为「已配置」', true)
+
+    const maskedShown = await evaluate(`window.__has('••••')`)
+    record('页面展示 Key 掩码', maskedShown === true)
+
+    const keyInputCleared = await evaluate(
+      `(document.querySelector('input[data-testid="model-api-key"]') || {}).value === ''`,
+    )
+    record('保存后输入框被清空（不回显明文）', keyInputCleared === true)
+
+    // 最关键的一条：整页 HTML 里都不应出现明文 Key
+    const plainLeaked = await evaluate(
+      `document.documentElement.outerHTML.includes(${JSON.stringify(fakeKey)})`,
+    )
+    record('页面源码中不含明文 Key', plainLeaked === false)
+
+    await shot('p3-settings.png')
+
+    // 用无效 Key 测试连接：应给出可读的失败原因，而不是白屏或一直转圈
+    await evaluate(`window.__clickButton('测试连接')`)
+    await waitFor(
+      `document.querySelector('[data-testid="test-model-result"]') !== null`,
+      '测试连接结果出现',
+      40000,
+    )
+    const testText = await evaluate(
+      `(document.querySelector('[data-testid="test-model-result"]')||{}).innerText || ''`,
+    )
+    record('无效 Key 测试连接返回可读提示', testText.length > 10, testText.split('\\n')[0].slice(0, 60))
+
+    // 清除配置，避免把测试账号的配置留在库里
+    const clickedClear = await evaluate(`window.__clickButton('清除配置')`)
+    await sleep(800)
+    const confirmed = await evaluate(`window.__clickButton('确定清除')`)
+    record('执行「清除配置」并确认', clickedClear === true && confirmed === true)
+
+    await waitFor(
+      `(document.querySelector('[data-testid="key-badge"]')||{}).textContent === '未配置'`,
+      '清除后状态回到未配置',
+      20000,
+    )
+    record('清除后标记为「未配置」', true)
+
+    console.log('\n=== 8. 页面运行时报错检查 ===')
     // 区分「组件弃用提示」与「真正的运行时报错」：
     // 弃用提示不影响功能，但需要单独列出来推动升级；真正的报错才算失败。
     const allIssues = pageErrors.filter(

@@ -32,6 +32,14 @@ export const config = {
   // 高德 JS API 安全密钥：与 JS Key 配套。2021 年后新建的 JS Key 都强制要求，
   // 缺少它地图会加载失败并报 INVALID_USER_SCODE。
   amapJsSecurityCode: process.env.AMAP_JS_SECURITY_CODE ?? '',
+
+  // ===== 以下为模型服务的全局默认值（可选）=====
+  // 用途：用户还没在「个人设置」里填自己的 API Key 时，后端回退到这里，
+  // 方便开发期先跑通 AI 排程。生产环境建议留空，强制每个用户配自己的 Key。
+  defaultModelProvider: process.env.DEFAULT_MODEL_PROVIDER ?? 'DeepSeek',
+  defaultModelBaseUrl: process.env.DEFAULT_MODEL_BASE_URL ?? 'https://api.deepseek.com/v1',
+  defaultModelName: process.env.DEFAULT_MODEL_NAME ?? 'deepseek-chat',
+  defaultModelApiKey: process.env.DEFAULT_MODEL_API_KEY ?? '',
 }
 
 // 启动时自检：主密钥必须是 64 位十六进制（即 32 字节），否则加密会失败
