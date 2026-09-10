@@ -21,7 +21,7 @@ export default function Settings() {
       <Alert
         type="info"
         showIcon
-        message="模型配置尚未开放"
+        title="模型配置尚未开放"
         description={
           <span>
             下一阶段将在这里提供模型厂商选择、接口地址、模型名称与 API Key 的填写入口。

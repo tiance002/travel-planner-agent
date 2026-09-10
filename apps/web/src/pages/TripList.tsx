@@ -1,7 +1,7 @@
 // 我的行程页。
 // P1 阶段只做列表展示，用来验证「登录后能拿到属于自己」的数据。
 
-import { App, Button, Card, Empty, Skeleton, Space, Tag, Typography } from 'antd'
+import { App, Button, Card, Empty, Popconfirm, Skeleton, Space, Tag, Typography } from 'antd'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, extractError } from '../api/client'
@@ -53,6 +53,17 @@ export default function TripList() {
     }
   }, [])
 
+  // 删除行程。删除后直接从本地列表里移除，不必重新拉一遍全量数据
+  async function handleDelete(id: string) {
+    try {
+      await api.delete(`/trips/${id}`)
+      setTrips((prev) => prev.filter((item) => item.id !== id))
+      message.success('行程已删除')
+    } catch (error) {
+      message.error(extractError(error, '删除失败'))
+    }
+  }
+
   return (
     <div style={{ maxWidth: 860, margin: '0 auto' }}>
       <Space
@@ -78,7 +89,7 @@ export default function TripList() {
           </Empty>
         </Card>
       ) : (
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Space orientation="vertical" size={12} style={{ width: '100%' }}>
           {trips.map((trip) => {
             const status = STATUS_TEXT[trip.status] ?? STATUS_TEXT.draft
             return (
@@ -108,6 +119,19 @@ export default function TripList() {
                       </Typography.Text>
                     </div>
                   </div>
+
+                  <Popconfirm
+                    title="确定删除这个行程吗？"
+                    description="删除后无法恢复，行程中的打卡记录也会一并清除。"
+                    okText="删除"
+                    okButtonProps={{ danger: true }}
+                    cancelText="取消"
+                    onConfirm={() => void handleDelete(trip.id)}
+                  >
+                    <Button danger size="small" type="text">
+                      删除
+                    </Button>
+                  </Popconfirm>
                 </Space>
               </Card>
             )

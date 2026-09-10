@@ -12,6 +12,7 @@
     "dev:web": "npm run dev -w @travel/web",
     "db:migrate": "npm run db:migrate -w @travel/server",
     "db:studio": "npm run db:studio -w @travel/server",
+    "smoke": "node tools/smoke.mjs",
     "build": "npm run build -w @travel/server && npm run build -w @travel/web"
   },
   "devDependencies": {

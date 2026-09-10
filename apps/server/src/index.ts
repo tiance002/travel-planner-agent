@@ -4,6 +4,7 @@ import cors from 'cors'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import { config } from './config'
+import { amapRouter } from './routes/amap'
 import { authRouter } from './routes/auth'
 import { tripsRouter } from './routes/trips'
 
@@ -23,6 +24,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api/auth', authRouter)
 app.use('/api/trips', tripsRouter)
+app.use('/api/amap', amapRouter)
 
 // 兜底错误处理。
 // 必须放在所有路由之后，且必须是四个参数，Express 才会把它识别为错误处理中间件。
