@@ -21,6 +21,9 @@ build/
 .vite/
 *.tsbuildinfo
 
+# Prisma 生成的客户端代码（由 prisma generate 产出，不入库）
+apps/server/src/generated/
+
 # 日志
 *.log
 npm-debug.log*

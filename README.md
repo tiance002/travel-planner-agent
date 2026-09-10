@@ -18,12 +18,22 @@
 
 | 层 | 选型 |
 |---|---|
-| 前端 | React 18 · TypeScript · Vite · Ant Design · 高德 JS API |
-| 后端 | Node.js · Express · TypeScript · Prisma |
-| 数据库 | 开发期 SQLite，上线目标 PostgreSQL |
+| 前端 | React 19 · TypeScript · Vite 8 · Ant Design 6 · 高德 JS API |
+| 后端 | Node.js 22 · Express 5 · TypeScript · Prisma 7 |
+| 数据库 | 开发期 SQLite（经 libSQL driver adapter），上线目标 PostgreSQL |
+| 数据校验 | Zod 4 |
 | AI | CodeBuddy Agent SDK · OpenAI 兼容接口 |
 | 地图与 POI | 高德开放平台 Web 服务 API（POI 搜索 / 路径规划 / 天气） |
 | 长周期天气 | Open-Meteo（补高德 4 天预报上限） |
+
+### 关于 Prisma 7 的两个注意点
+
+Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻意为之，不是配置错误：
+
+1. **连接串不再写在 `schema.prisma` 里**，而是移到 `apps/server/prisma.config.ts` 的 `datasource.url`；`schema.prisma` 的 `datasource` 块只声明 `provider`。
+2. **客户端必须显式传入 driver adapter**。项目选用 `@prisma/adapter-libsql`，原因是它依赖平台预编译包，无需 node-gyp 本地编译；而 `better-sqlite3` 需要执行安装脚本（`prebuild-install || node-gyp rebuild`），在 Windows 上更容易失败。
+
+另外，生成的客户端代码位于 `apps/server/src/generated/prisma/`，属于构建产物，已在 `.gitignore` 中排除，需要执行 `prisma generate` 重新产出。
 
 ## 目录结构
 
@@ -47,9 +57,13 @@ npm install
 
 # 2. 配置环境变量
 cp apps/server/.env.example apps/server/.env
-# 然后编辑 apps/server/.env，填入你自己的密钥
+# 然后编辑 apps/server/.env，填入你自己生成的密钥
+#
+# 生成两个密钥的命令：
+#   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # JWT_SECRET
+#   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # VAULT_MASTER_KEY
 
-# 3. 初始化数据库
+# 3. 初始化数据库（会自动生成 Prisma 客户端并创建 apps/server/prisma/dev.db）
 npm run db:migrate
 
 # 4. 同时启动前后端
@@ -57,6 +71,8 @@ npm run dev
 ```
 
 启动后：前端 http://localhost:5173 ，后端 http://localhost:3001 。
+
+> 首次运行 `npm run db:migrate` 需要联网下载 Prisma 的 schema engine，耗时取决于网络状况。
 
 ## 环境变量
 

@@ -6,13 +6,16 @@
 //   3. 重新生成迁移
 // 因此在写业务代码时，请避免使用 SQLite 专有语法。
 
+// Prisma 7 起改用新的 prisma-client 生成器，必须显式指定 output。
+// 生成结果是源码而非 node_modules 内的黑盒，便于调试。
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
+// Prisma 7 起 datasource 不再接受 url，连接串统一放到 prisma.config.ts
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 /// 用户账号
