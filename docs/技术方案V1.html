@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅游规划 Agent Web 应用 · 技术方案 V1</title>
+<style>
+  :root{--bg:#fff;--fg:#1f2329;--muted:#646a73;--line:#e5e6eb;--primary:#185FA5;--primary-bg:#E6F1FB;--warn:#854F0B;--warn-bg:#FAEEDA;--danger:#A32D2D;--danger-bg:#FCEBEB;--ok:#3B6D11;--ok-bg:#EAF3DE;--code-bg:#f2f3f5;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:#f7f8fa;line-height:1.7;font-size:15px}
+  .wrap{max-width:980px;margin:0 auto;padding:44px 32px 90px;background:#fff}
+  h1{font-size:26px;font-weight:600;margin:0 0 6px}
+  h2{font-size:19px;font-weight:600;margin:46px 0 14px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:16px;font-weight:600;margin:26px 0 10px}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 4px}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#f5f6f7;font-weight:600;white-space:nowrap}
+  code{background:var(--code-bg);padding:1px 5px;border-radius:4px;font-family:Consolas,Monaco,monospace;font-size:13px}
+  pre{background:#1f2329;color:#e5e6eb;padding:16px 18px;border-radius:8px;overflow-x:auto;font-size:13px;line-height:1.65}
+  pre code{background:none;color:inherit;padding:0}
+  .box{border-radius:8px;padding:12px 16px;margin:14px 0;font-size:14px}
+  .box.warn{background:var(--warn-bg);border-left:3px solid var(--warn)}
+  .box.danger{background:var(--danger-bg);border-left:3px solid var(--danger)}
+  .box.ok{background:var(--ok-bg);border-left:3px solid var(--ok)}
+  .box.info{background:var(--primary-bg);border-left:3px solid var(--primary)}
+  .box p:first-child{margin-top:0}.box p:last-child{margin-bottom:0}
+  ul,ol{padding-left:22px}
+  .fig{margin:20px 0}
+  .fig svg{width:100%;height:auto;display:block}
+  .cap{color:var(--muted);font-size:13px;margin-top:8px;text-align:center}
+  .tag{display:inline-block;font-size:12px;padding:1px 9px;border-radius:10px;background:var(--primary-bg);color:var(--primary);margin-right:6px;white-space:nowrap}
+  .tag.fixed{background:var(--ok-bg);color:var(--ok)}
+  .tag.todo{background:var(--warn-bg);color:var(--warn)}
+  .tag.out{background:var(--danger-bg);color:var(--danger)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>旅游规划 Agent Web 应用 · 技术方案 V1</h1>
+<p class="sub">需求冻结版 · 2026-09-10 · 基于前四轮需求澄清结论编制</p>
+
+<h2>0. 本轮新发现的问题</h2>
+
+<p>你这一轮的回答把需求基本冻结了，但其中三条里各藏着一个需要先定掉的坑。</p>
+
+<div class="box danger">
+  <p><strong>问题 1：打卡的触发方式没定义，而且视觉方向是反的。</strong></p>
+  <p>你写的是「让景点在地图上点亮，用户到地点打卡，打卡的地点变暗」。这里有两件事：一是<strong>系统怎么知道用户「到了」</strong>——是用户自己点一下按钮，还是靠手机定位自动判定？这决定要不要申请浏览器定位权限、要不要强制 HTTPS、以及弱信号下的兜底策略。二是<strong>视觉语义反直觉</strong>：绝大多数产品的习惯是「未完成=灰暗，完成=点亮」，你这里是反过来的。用户第一次看到「亮点」很可能以为已经去过了。建议改成：未打卡 = 空心标记，已打卡 = 实心带勾。详见第 8 节。</p>
+</div>
+
+<div class="box danger">
+  <p><strong>问题 2：「距离按直线算」只能用于粗筛，地图上画的路线必须用真实路径。</strong></p>
+  <p>直线距离（两点连线的球面距离）算得快，但会选出「直线很近、实际要绕 40 分钟」的点。典型场景：上海选到浦东和浦西各一个点，直线 3 公里，实际过江要绕；重庆两江四岸、有山体阻隔的城市更明显。正确做法是<strong>用直线距离做排序和聚类，用高德路径规划生成最终路线和通勤时间</strong>——反正地图上要画线，本来就得调路径规划。另外建议加一道校验：相邻两点实际通勤时间超过 40 分钟就换掉一个点。</p>
+</div>
+
+<div class="box danger">
+  <p><strong>问题 3：「不算每个景点玩多久」之后，「时间轴」就名不副实了。</strong></p>
+  <p>第 2 轮你确认了「按天时间轴 + 地图联动」，但这一轮说不用计算游览时长。两者不能同时成立：没有时长就无法排出「9:00–11:00 游览 A」这样的具体时刻。可行的形态是<strong>时段分组的顺序列表</strong>——上午 1 个景点、午餐、下午至晚上 1–2 个景点，只标顺序不标钟点。需你确认接受这个降级。</p>
+</div>
+
+<div class="box warn">
+  <p><strong>问题 4：「只支持单城市」没有回答境内还是境外。</strong></p>
+  <p>高德地图的数据基本只覆盖中国境内，境外城市既没有 POI 也没有路线。所以「单城市」还需要补一句：<strong>第一版是否只支持中国境内城市？</strong>如果是，Google Places 和 OpenStreetMap 就可以从 V1 里彻底删掉，方案更干净；如果境外也要，就得再补一套数据源和地图兜底，工作量显著增加。本方案按<strong>仅境内</strong>编制。</p>
+</div>
+
+<h2>1. 需求基线（冻结版）</h2>
+
+<table>
+<tr><th>模块</th><th>具体内容</th><th>状态</th></tr>
+<tr><td>账号</td><td>用户名 + 密码注册登录，Argon2id 加盐哈希，JWT 会话</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>我的行程</td><td>行程列表（含打卡进度）+ 行程详情（按天时段列表 + 地图联动）</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>新建行程</td><td>四步向导：基本信息 → 选住宿 → AI 生成 → 结果</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>基本信息输入</td><td>目的地（单城市）、起始日、天数、团队人数、旅游偏好、预算范围、额外需求</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>住宿锚点</td><td>内嵌高德 JS 地图选点；可选择「还没定」，由 AI 推荐 2–3 个中心区域兜底</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>行程生成</td><td>以住宿为锚点，直线距离排序；每天景点 ≤ 3 个（不含餐厅）；上午 1 个、下午至晚上 1–2 个</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>餐饮推荐</td><td>就近插入相邻景点之间，不单独占时段（吃不上正经一餐的时段也出附近推荐）</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>营业时间</td><td>纳入排程过滤（闭馆日替换该景点）；字段缺失时标注「营业时间未知」</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>地图展示</td><td>高德 JS API 内嵌；显示住宿锚点、当日景点、餐厅、路线</td><td><span class="tag fixed">已定</span></td></tr>
+<tr><td>打卡</td><td>景点打卡并持久化，地图标记状态随之变化</td><td><span class="tag todo">待定触发方式</span></td></tr>
+<tr><td>个人设置</td><td>选择模型 + 填写 API Key，服务端主密钥加密存储</td><td><span class="tag fixed">已定</span></td></tr>
+</table>
+
+<h3>明确排除在 V1 之外</h3>
+<p>
+<span class="tag out">Electron 桌面端</span>
+<span class="tag out">多城市行程</span>
+<span class="tag out">多人协作与分享</span>
+<span class="tag out">小红书 / 美团数据接入</span>
+<span class="tag out">境外目的地</span>
+<span class="tag out">酒店与门票预订</span>
+</p>
+<p class="sub">行程手动编辑（调顺序、删点）与导出 PDF：你上轮未明确表态，本方案将其列为 V1.5 候选，不进 V1 开发范围。</p>
+
+<h2>2. 系统架构</h2>
+
+<div class="fig">
+<svg viewBox="0 0 900 470" role="img">
+<title>系统架构</title>
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+<rect x="40" y="30" width="820" height="100" rx="18" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="62" y="56" style="font:600 14px sans-serif;fill:#185FA5">浏览器端 · React + Vite + TypeScript</text>
+<rect x="60" y="70" width="180" height="40" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="150" y="94" text-anchor="middle" style="font:400 13px sans-serif;fill:#1f2329">我的行程</text>
+<rect x="252" y="70" width="180" height="40" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="342" y="94" text-anchor="middle" style="font:400 13px sans-serif;fill:#1f2329">新建行程向导</text>
+<rect x="444" y="70" width="180" height="40" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="534" y="94" text-anchor="middle" style="font:400 13px sans-serif;fill:#1f2329">个人设置</text>
+<rect x="636" y="70" width="180" height="40" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="726" y="94" text-anchor="middle" style="font:400 13px sans-serif;fill:#1f2329">高德地图组件</text>
+<path d="M450 130L450 174" fill="none" stroke="#185FA5" stroke-opacity="0.55" stroke-width="1.5" marker-end="url(#ar)"/>
+<text x="462" y="156" style="font:400 12px sans-serif;fill:#646a73">HTTPS · JWT</text>
+<rect x="40" y="180" width="820" height="110" rx="18" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="62" y="208" style="font:600 14px sans-serif;fill:#185FA5">服务端 · Node + Express + TypeScript</text>
+<rect x="60" y="222" width="180" height="44" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="150" y="244" text-anchor="middle" style="font:400 12.5px sans-serif;fill:#1f2329">认证服务</text>
+<rect x="252" y="222" width="180" height="44" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="342" y="244" text-anchor="middle" style="font:400 12.5px sans-serif;fill:#1f2329">Key 保险箱</text>
+<rect x="444" y="222" width="180" height="44" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="534" y="244" text-anchor="middle" style="font:400 12.5px sans-serif;fill:#1f2329">行程编排 Agent</text>
+<rect x="636" y="222" width="180" height="44" rx="8" fill="#fff" stroke="#185FA5" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="726" y="244" text-anchor="middle" style="font:400 12.5px sans-serif;fill:#1f2329">高德接口代理</text>
+<text x="150" y="278" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">注册 / 登录 / JWT 签发</text>
+<text x="342" y="278" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">AES-256-GCM 加解密</text>
+<text x="534" y="278" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">CodeBuddy Agent SDK</text>
+<text x="726" y="278" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">配额 · 缓存 · 限流</text>
+<path d="M450 290L450 336" fill="none" stroke="#185FA5" stroke-opacity="0.55" stroke-width="1.5" marker-end="url(#ar)"/>
+<rect x="40" y="340" width="190" height="96" rx="12" fill="#F2F3F5" stroke="#646a73" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="135" y="366" text-anchor="middle" style="font:500 13.5px sans-serif;fill:#1f2329">PostgreSQL</text>
+<text x="135" y="390" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">开发期 Docker 运行</text>
+<text x="135" y="410" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">上云只改连接串</text>
+<rect x="250" y="340" width="190" height="96" rx="12" fill="#F2F3F5" stroke="#646a73" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="345" y="366" text-anchor="middle" style="font:500 13.5px sans-serif;fill:#1f2329">高德 Web 服务</text>
+<text x="345" y="390" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">POI 搜索 · 路径规划</text>
+<text x="345" y="410" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">地理编码 · 天气</text>
+<rect x="460" y="340" width="190" height="96" rx="12" fill="#F2F3F5" stroke="#646a73" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="555" y="366" text-anchor="middle" style="font:500 13.5px sans-serif;fill:#1f2329">Open-Meteo</text>
+<text x="555" y="390" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">长周期预报</text>
+<text x="555" y="410" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">补高德 4 天上限</text>
+<rect x="670" y="340" width="190" height="96" rx="12" fill="#F2F3F5" stroke="#646a73" stroke-opacity="0.3" stroke-width="0.5"/>
+<text x="765" y="366" text-anchor="middle" style="font:500 13.5px sans-serif;fill:#1f2329">用户自备 LLM</text>
+<text x="765" y="390" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">OpenAI 兼容接口</text>
+<text x="765" y="410" text-anchor="middle" style="font:400 12px sans-serif;fill:#646a73">Key 由服务端托管</text>
+</svg>
+<div class="cap">图 1 · 系统架构。前端不持有任何密钥，全链路只经服务端转发。</div>
+</div>
+
+<div class="box info">
+  <p><strong>两套高德 Key，用法不同，别混。</strong>浏览器端加载地图用 <em>Web 端（JS API）Key</em>，需要配置域名白名单；服务端查 POI、路径、天气用 <em>Web 服务 Key</em>。前者必须暴露给浏览器，所以要靠域名白名单保护；后者只能待在服务端，绝不能下发到前端。</p>
+</div>
+
+<h2>3. 目录结构</h2>
+
+<pre><code>travel-planner/
+├─ apps/
+│  ├─ web/                          # 前端
+│  │  └─ src/
+│  │     ├─ pages/
+│  │     │  ├─ Login.tsx            # 登录 / 注册
+│  │     │  ├─ TripList.tsx         # 我的行程
+│  │     │  ├─ TripDetail.tsx       # 行程详情（时段列表 + 地图 + 打卡）
+│  │     │  ├─ Settings.tsx         # 个人设置（模型与 Key）
+│  │     │  └─ wizard/
+│  │     │     ├─ index.tsx         # 四步向导容器（含草稿与回退）
+│  │     │     ├─ Step1Basic.tsx    # 基本信息
+│  │     │     ├─ Step2Stay.tsx     # 内嵌地图选住宿
+│  │     │     ├─ Step3Generate.tsx # 流式生成进度
+│  │     │     └─ Step4Result.tsx   # 结果确认
+│  │     ├─ components/
+│  │     │  ├─ AmapCanvas.tsx       # 高德地图封装（泳道 Marker + 路线）
+│  │     │  ├─ DaySection.tsx       # 分天时段列表
+│  │     │  └─ SpotCard.tsx         # 景点卡片（含打卡按钮）
+│  │     ├─ hooks/
+│  │     ├─ api/                    # 后端请求封装
+│  │     ├─ store/                  # 会话与行程状态
+│  │     └─ types/
+│  └─ server/                       # 后端
+│     └─ src/
+│        ├─ routes/                 # auth / trips / settings / generate
+│        ├─ middleware/             # 鉴权、错误处理、限流
+│        ├─ agent/
+│        │  ├─ orchestrator.ts      # CodeBuddy Agent SDK 编排入口
+│        │  ├─ prompt.ts            # 系统提示词与约束
+│        │  └─ tools/               # Agent 可调用的工具（见第 5 节）
+│        ├─ services/
+│        │  ├─ amap.ts              # 高德 Web 服务封装 + 缓存
+│        │  ├─ weather.ts           # 高德天气 + Open-Meteo 降级
+│        │  └─ quota.ts             # 配额与限流
+│        ├─ crypto/vault.ts         # Key 保险箱（AES-256-GCM）
+│        ├─ db/                     # Prisma schema 与迁移
+│        └─ jobs/                   # 行程生成任务（可后台执行）
+├─ packages/
+│  └─ shared/                       # 前后端共享的 TypeScript 类型
+├─ docker-compose.yml               # 本地 PostgreSQL
+└─ .env.example                     # 环境变量模板（真 .env 进 .gitignore）</code></pre>
+
+<h2>4. 数据表设计</h2>
+
+<h3>users — 账号</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>id</code></td><td>uuid</td><td>主键</td></tr>
+<tr><td><code>username</code></td><td>varchar(32) unique</td><td>登录名</td></tr>
+<tr><td><code>password_hash</code></td><td>text</td><td>Argon2id 加盐哈希，禁止明文与 MD5</td></tr>
+<tr><td><code>created_at</code> / <code>updated_at</code></td><td>timestamptz</td><td></td></tr>
+</table>
+
+<h3>user_settings — 模型配置与密钥</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>user_id</code></td><td>uuid PK</td><td>与 users 一对一</td></tr>
+<tr><td><code>provider</code></td><td>varchar</td><td>展示用名称，如 DeepSeek / 通义</td></tr>
+<tr><td><code>base_url</code></td><td>varchar</td><td>OpenAI 兼容接口地址，支持自定义</td></tr>
+<tr><td><code>model_name</code></td><td>varchar</td><td>模型名，如 deepseek-chat</td></tr>
+<tr><td><code>api_key_cipher</code></td><td>bytea</td><td>AES-256-GCM 密文</td></tr>
+<tr><td><code>api_key_iv</code></td><td>bytea</td><td>每条记录独立随机 IV（12 字节）</td></tr>
+<tr><td><code>api_key_tag</code></td><td>bytea</td><td>GCM 认证标签，防篡改</td></tr>
+<tr><td><code>key_version</code></td><td>smallint</td><td>主密钥版本号，用于将来轮换</td></tr>
+</table>
+
+<div class="box warn">
+  <p>留 <code>key_version</code> 这一列的成本几乎为零，但缺了它，将来换主密钥时就得停机手工重加密所有用户的 Key。建议现在就加上。</p>
+</div>
+
+<h3>trips — 行程主表</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>id</code> / <code>user_id</code></td><td>uuid</td><td>主键 / 归属用户</td></tr>
+<tr><td><code>title</code></td><td>varchar</td><td>行程标题，默认「城市 + 天数」</td></tr>
+<tr><td><code>city_name</code> / <code>city_adcode</code></td><td>varchar</td><td>城市名与行政区划编码（高德接口必填 adcode）</td></tr>
+<tr><td><code>start_date</code></td><td>date</td><td>出发日</td></tr>
+<tr><td><code>days</code></td><td>smallint</td><td>天数 1–15</td></tr>
+<tr><td><code>travelers</code></td><td>smallint</td><td>团队人数，用于人均分摊与餐厅容量建议</td></tr>
+<tr><td><code>preferences</code></td><td>jsonb</td><td>旅游偏好多选数组</td></tr>
+<tr><td><code>extra_needs</code></td><td>jsonb</td><td>额外需求数组</td></tr>
+<tr><td><code>budget_amount</code> / <code>budget_scope</code></td><td>numeric / varchar</td><td>预算数额 + 口径（人均，不含往返大交通）</td></tr>
+<tr><td><code>stay_resolved</code></td><td>boolean</td><td>住宿是否已确定</td></tr>
+<tr><td><code>stay_poi_id</code> / <code>stay_name</code> / <code>stay_lng</code> / <code>stay_lat</code></td><td>varchar/numeric</td><td>锚点住宿；未定则存 AI 推荐的中心区域</td></tr>
+<tr><td><code>status</code></td><td>varchar</td><td>draft / generating / ready / failed</td></tr>
+</table>
+
+<h3>trip_days — 每天的容器</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>trip_id</code> / <code>day_index</code></td><td>uuid / smallint</td><td>第几天（从 1 开始）</td></tr>
+<tr><td><code>date</code></td><td>date</td><td>该天日期</td></tr>
+<tr><td><code>weather</code></td><td>jsonb</td><td>天气；超出预报窗口时为 null 并附说明</td></tr>
+<tr><td><code>summary</code></td><td>text</td><td>当日一句话概述</td></tr>
+</table>
+
+<h3>trip_items — 行程条目与打卡状态</h3>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>id</code> / <code>trip_day_id</code></td><td>uuid</td><td>主键 / 归属日</td></tr>
+<tr><td><code>order_index</code></td><td>smallint</td><td>当天顺序</td></tr>
+<tr><td><code>slot</code></td><td>varchar</td><td>morning / noon / afternoon / evening</td></tr>
+<tr><td><code>item_type</code></td><td>varchar</td><td>spot（景点）/ restaurant（餐厅）</td></tr>
+<tr><td><code>poi_id</code> / <code>name</code> / <code>lng</code> / <code>lat</code> / <code>address</code> / <code>tel</code></td><td>—</td><td>高德 POI 原样落库</td></tr>
+<tr><td><code>rating</code> / <code>cost</code> / <code>tag</code></td><td>—</td><td>评分 / 人均 / 特色菜（仅美食 POI 有 tag）</td></tr>
+<tr><td><code>open_time_text</code></td><td>varchar</td><td>营业时间原文；缺失时前端显示「营业时间未知」</td></tr>
+<tr><td><code>note</code></td><td>text</td><td>AI 的一句话推荐理由</td></tr>
+<tr><td><code>checked_at</code></td><td>timestamptz</td><td><strong>打卡时间，null 表示未打卡</strong></td></tr>
+</table>
+
+<div class="box ok">
+  <p>打卡状态直接挂在 <code>trip_items</code> 上（<code>checked_at</code> 是否为 null），不需要额外一张表——因为存在「打卡」这个事实就能表达状态，时间字段顺便留下真实游览记录。</p>
+</div>
+
+<h2>5. Agent 工具清单</h2>
+
+<p>CodeBuddy Agent SDK 在后端运行，通过 function calling 调用下面这些工具。工具本身是薄封装，真正的活儿在高德与本地计算里。</p>
+
+<table>
+<tr><th>工具名</th><th>底层接口</th><th>作用与关键参数</th></tr>
+<tr><td><code>geocode_city</code></td><td>高德 地理编码</td><td>城市名 → adcode 与中心坐标</td></tr>
+<tr><td><code>search_spots</code></td><td>高德 POI 周边/关键字搜索</td><td>按锚点坐标 + 半径搜候选景点，取 <code>rating</code>、<code>opentime_today</code>、<code>typecode</code>；分页上限 200 条</td></tr>
+<tr><td><code>search_stay</code></td><td>高德 POI 关键字搜索</td><td>按预算与偏好推荐住宿候选（供「还没定」时兜底）</td></tr>
+<tr><td><code>search_restaurants</code></td><td>高德 POI 周边搜索</td><td>在相邻两景点坐标之间取中点，半径内搜 <code>types=050000</code>，按 <code>rating</code> 与 <code>cost</code> 排序</td></tr>
+<tr><td><code>straight_distance</code></td><td>本地计算</td><td>球面直线距离，用于排序与聚类（注意：仅用于粗筛）</td></tr>
+<tr><td><code>plan_route</code></td><td>高德 路径规划</td><td>生成真实路线与耗时，供地图绘制与通勤校验（步行/驾车/公交）</td></tr>
+<tr><td><code>get_weather</code></td><td>高德天气 → Open-Meteo 降级</td><td>行程日期在 4 天内走高德，超出自动切 Open-Meteo，再超出则气候均值</td></tr>
+<tr><td><code>save_itinerary</code></td><td>本地写库</td><td>把结构化行程落库，返回 trip_id</td></tr>
+</table>
+
+<div class="box warn">
+  <p><strong>别让模型自由发挥时直接产出坐标。</strong>所有坐标必须来自工具返回的高德 POI，模型只负责「选哪些、怎么串」，不负责「编造经纬度」。否则地图上会出现飘到海里的标记。这是这类应用最常见的翻车点。</p>
+</div>
+
+<h2>6. 每日行程生成流程</h2>
+
+<div class="fig">
+<svg viewBox="0 0 900 372" role="img">
+<title>每日行程生成流程</title>
+<defs>
+<marker id="ar2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+<rect x="40" y="30" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="60" y="59" style="font:400 13px sans-serif;fill:#1f2329">1 · 取锚点：住宿坐标（或 AI 推荐的中心区域）</text>
+<rect x="480" y="30" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="500" y="59" style="font:400 13px sans-serif;fill:#1f2329">2 · 周边搜索候选景点，带评分与营业时间</text>
+<path d="M420 54L474 54" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<path d="M670 78L670 100L230 100L230 114" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<rect x="40" y="118" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="60" y="147" style="font:400 13px sans-serif;fill:#1f2329">3 · 按偏好评过滤，直线距离排序</text>
+<rect x="480" y="118" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="500" y="147" style="font:400 13px sans-serif;fill:#1f2329">4 · 聚类分天：每天 3 个地理上聚拢的点</text>
+<path d="M420 142L474 142" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<path d="M670 166L670 188L230 188L230 202" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<rect x="40" y="206" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="60" y="235" style="font:400 13px sans-serif;fill:#1f2329">5 · 校验营业时间，闭馆日换点</text>
+<rect x="480" y="206" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="500" y="235" style="font:400 13px sans-serif;fill:#1f2329">6 · 相邻景点之间就近插入餐厅</text>
+<path d="M420 230L474 230" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<path d="M670 254L670 276L230 276L230 290" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+<rect x="40" y="294" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="60" y="323" style="font:400 13px sans-serif;fill:#1f2329">7 · 路径规划生成真实路线与通勤时间</text>
+<rect x="480" y="294" width="380" height="48" rx="10" fill="#E6F1FB" stroke="#185FA5" stroke-opacity="0.35" stroke-width="0.5"/>
+<text x="500" y="323" style="font:400 13px sans-serif;fill:#1f2329">8 · 附天气后落库，返回 trip_id</text>
+<path d="M420 318L474 318" fill="none" stroke="#185FA5" stroke-opacity="0.5" stroke-width="1.5" marker-end="url(#ar2)"/>
+</svg>
+<div class="cap">图 2 · 每日行程生成算法。第 2–4 步用直线距离（快），第 7 步必须用真实路径（准）。</div>
+</div>
+
+<h3>第 4 步的分天规则（对应你定的约束）</h3>
+<ul>
+<li>每天景点上限 <strong>3 个</strong>，餐厅不计入该上限。</li>
+<li>时段分配：<strong>上午 1 个景点 → 午餐 → 下午至晚上 1–2 个景点 → 晚餐</strong>。</li>
+<li>若当天只有 1 个景点（如首日抵达），餐厅退化为「景点周边就近推荐」，不再要求夹在两景点之间。</li>
+<li>首日与末日建议按半天强度处理（景点数可降为 1–2 个），这一点需你确认。</li>
+<li>聚类时同一天的 3 个景点应落在同一片区域内，而不是满城对角线跑。</li>
+</ul>
+
+<h2>7. 页面结构</h2>
+
+<table>
+<tr><th>页面</th><th>内容</th></tr>
+<tr><td>登录 / 注册</td><td>用户名、密码、确认密码；错误提示；登录后跳「我的行程」</td></tr>
+<tr><td>我的行程</td><td>行程卡片列表：城市、日期、天数、打卡进度（已打卡 / 总景点数）；新建入口</td></tr>
+<tr><td>行程详情</td><td>左侧分天时段列表（上午 / 午餐 / 下午至晚上），右侧高德地图。点某一天地图只显示当天路线；点某个地点地图定位并高亮；景点卡片带「打卡」按钮</td></tr>
+<tr><td>新建行程（四步）</td><td>第 1 步表单；第 2 步内嵌地图选住宿（含「还没定」选项）；第 3 步流式展示生成进度；第 4 步结果预览与保存</td></tr>
+<tr><td>个人设置</td><td>模型厂商、接口地址、模型名、API Key（密文回显为掩码，只允许覆盖不允许查看）；一句密钥托管说明</td></tr>
+</table>
+
+<h2>8. 打卡机制设计</h2>
+
+<p>三种可选实现，差别在「系统怎么确认用户到了」：</p>
+
+<table>
+<tr><th>方案</th><th>做法</th><th>优点</th><th>代价</th></tr>
+<tr><td><strong>A 手动打卡</strong></td><td>点击卡片上的「我已到达」</td><td>零依赖，最快落地</td><td>不防作弊（个人工具其实不需要）</td></tr>
+<tr><td><strong>B 定位打卡</strong></td><td>浏览器定位取坐标，与景点坐标距离小于阈值即判定到达</td><td>体验好，不需要用户操作</td><td>需 HTTPS 与定位授权；室内精度差，阈值要放宽到 300–500 米；被拒绝授权要能降级</td></tr>
+<tr><td><strong>C 混合（建议）</strong></td><td>默认手动，用户可在设置里开启「定位自动打卡」</td><td>照顾两种场景，不强制</td><td>实现量略大，但只是一层判定分支</td></tr>
+</table>
+
+<div class="box danger">
+  <p><strong>视觉语义建议改掉。</strong>你原本的设计是「点亮 = 未打卡，变暗 = 已打卡」，与主流习惯相反，用户会误判。建议：<br>
+  · 未打卡景点 = 空心圆点标记 + 常规颜色<br>
+  · 已打卡景点 = 实心标记 + 对勾角标 + 卡片置灰<br>
+  · 当天推荐中的当前目标 = 放大或加脉冲效果区分<br>
+  另外建议默认<strong>只显示当天</strong>的标记，否则 7 天行程 20 多个点全铺在地图上会糊成一片。</p>
+</div>
+
+<div class="box info">
+  <p><strong>隐私提示：</strong>如果采用定位打卡，位置数据只用于「是否到达」这一瞬间的判定，不记录轨迹、不落库原始坐标。这一点应写进隐私政策。</p>
+</div>
+
+<h2>9. 开发阶段建议</h2>
+
+<table>
+<tr><th>阶段</th><th>交付</th><th>完成标志</th></tr>
+<tr><td>P1 骨架</td><td>前后端项目初始化、Docker Postgres、Prisma 建表、登录注册、JWT 中间件</td><td>能用用户名密码注册并登录，拿到受保护接口数据</td></tr>
+<tr><td>P2 设置与密钥</td><td>Key 保险箱（AES-256-GCM）、设置页、模型连通性测试按钮</td><td>填入 Key 后能成功调用一次模型并返回结果</td></tr>
+<tr><td>P3 地图与选住宿</td><td>高德 JS 地图组件、POI 搜索、选点回填、中心区域兜底推荐</td><td>能在地图上选定住宿并保存坐标</td></tr>
+<tr><td>P4 Agent 生成</td><td>工具封装、编排提示词、流式进度、落库</td><td>输入条件后能产出符合约束的整段行程</td></tr>
+<tr><td>P5 展示与打卡</td><td>行程详情页、时段列表与地图联动、打卡与状态持久化</td><td>打卡后刷新页面状态仍在，地图标记正确</td></tr>
+<tr><td>P6 加固与上云</td><td>配额限流、缓存、错误降级、HTTPS、域名与备案</td><td>可对外访问且高德配额不被刷爆</td></tr>
+</table>
+
+<h2>10. 合规检查清单</h2>
+
+<ul>
+<li><strong>地图合规：</strong>境内地图必须使用具备甲级测绘资质的地图服务（高德符合），并保留审图号展示；<strong>不得自行绘制或篡改国界线与行政区域</strong>，不能拿一份 GeoJSON 自己画中国地图。</li>
+<li><strong>数据来源：</strong>只用高德官方 Web 服务 API，不抓取小红书、美团、大众点评。已确认这三条路或不存在、或需企业资质与高额保证金。</li>
+<li><strong>AI 内容标注：</strong>行程由模型生成，页面需标注「内容由 AI 生成，营业时间与价格请以实际情况为准」。高德 POI 的营业时间字段缺失率不低。</li>
+<li><strong>密钥托管：</strong>主密钥放环境变量，不提交仓库；AES-256-GCM 加密；日志脱敏；设置页如实告知用户密钥由服务端加密存储。</li>
+<li><strong>个人信息：</strong>收集用户名与行程数据，面向公众上线需隐私政策、用户协议与 ICP 备案。</li>
+<li><strong>定位权限：</strong>若启用定位打卡，需明确告知用途且可随时关闭。</li>
+</ul>
+
+<h2>11. 仍待你确认的四项</h2>
+
+<table>
+<tr><th>#</th><th>待确认</th><th>我方建议</th></tr>
+<tr><td>1</td><td>打卡触发方式选 A / B / C</td><td>C（默认手动，可开启定位）</td></tr>
+<tr><td>2</td><td>是否接受「时段分组顺序列表」替代具体时刻时间轴</td><td>接受（因为已确定不计算游览时长）</td></tr>
+<tr><td>3</td><td>第一版是否<strong>仅限中国境内城市</strong></td><td>仅境内（可删掉 Google Places 与 OSM）</td></tr>
+<tr><td>4</td><td>首日与末日是否按半天强度减少景点数</td><td>是，降为 1–2 个</td></tr>
+</table>
+
+<p class="sub" style="margin-top:36px">本文档为需求与技术设计，尚未编写任何项目代码。</p>
+
+</div>
+</body>
+</html>

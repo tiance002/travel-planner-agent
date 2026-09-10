@@ -1,0 +1,20 @@
+{
+  "name": "travel-planner-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "基于 AI Agent 的旅游规划 Web 应用：以住宿为锚点生成每日行程，地图联动并支持到点打卡",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @travel/server\" \"npm run dev -w @travel/web\"",
+    "dev:server": "npm run dev -w @travel/server",
+    "dev:web": "npm run dev -w @travel/web",
+    "db:migrate": "npm run db:migrate -w @travel/server",
+    "db:studio": "npm run db:studio -w @travel/server",
+    "build": "npm run build -w @travel/server && npm run build -w @travel/web"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}
