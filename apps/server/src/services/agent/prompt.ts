@@ -54,6 +54,11 @@ export interface DayPromptInput extends TripBasics {
    * 昨天夜爬看日出、或者爬了一整天山，今天的体力就不该按常规安排。
    */
   previousDayState?: { dayType: string; intensity: string } | null
+  /**
+   * 前面几天已经安排过的夜间活动类别（bar / snack_street）。
+   * 酒吧与小吃街整趟各只安排一次，所以要把已用过的告诉模型。
+   */
+  usedNightKinds?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +85,9 @@ const TASTE_GUIDE = `# 规划口味
 - **晚上优先考虑有当地味道的去处**：知名夜市、小吃街、有夜景的江边/湖畔/观景地点。
   是否安排要看用户偏好（例如夜生活、美食、摄影）与额外需求（例如带老人、带小孩时不宜太晚），
   合适的话用 evening 时段安排一个，为当天收尾。搜索夜市/小吃街可用「夜市」「美食街」等关键词。
+- **酒吧与小吃街整趟行程各只安排一次**。这两类地方彼此差别不大，重复去等于浪费一个晚上。
+  如果确定要去，挑一个晚上去酒吧、另一个晚上去小吃街就够了，其余晚上换成夜景、
+  散步、演出、茶馆或早点休息。前面几天已经去过哪一类，会在下面明确告诉你。
 
 # 一天可以是什么样子（行程体裁）
 
@@ -251,6 +259,24 @@ export function buildDayUserPrompt(input: DayPromptInput): string {
         `这一天建议按 recovery（恢复日）安排，节奏放缓，从下午开始，挑轻松的地点。`,
       )
     }
+  }
+
+  // 夜生活去重。用户的原话是「酒吧都差不多，小吃街也一样，
+  // 选其中一次去酒吧、一次去小吃街即可」——所以这两类整趟各只安排一次
+  if (input.usedNightKinds && input.usedNightKinds.length > 0) {
+    const names = input.usedNightKinds.map((kind) => (kind === 'bar' ? '酒吧' : '小吃街'))
+    const rest = ['bar', 'snack_street'].filter((kind) => !input.usedNightKinds!.includes(kind))
+    const restNames = rest.map((kind) => (kind === 'bar' ? '酒吧' : '小吃街'))
+    lines.push(
+      '',
+      `**夜生活去重要求：前面几天已经安排过${names.join('和')}了。**`,
+      `酒吧之间差别不大、小吃街也一样，同类去一次就够了。`,
+      `这一天的晚上请改排别的：夜景、江边或湖边散步、演出、茶馆、书店，` +
+        `或者干脆安排早点休息。`,
+      restNames.length > 0
+        ? `（${restNames.join('和')}这趟还没去过，如果合适可以留到别的晚上。）`
+        : '',
+    )
   }
 
   lines.push(

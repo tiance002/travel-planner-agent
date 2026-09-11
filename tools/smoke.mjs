@@ -276,11 +276,18 @@ async function main() {
       const box = await evaluate(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return null;
+        // 先把元素滚到视口中央，再取坐标。
+        // 不滚的话，元素落在折叠线以下时 getBoundingClientRect 给出的是视口外的
+        // 坐标，CDP 把鼠标事件发到那个位置根本打不到它——表现成「点了没反应」，
+        // 而且不会有任何报错，极难排查（表单多加几个分区标题就会触发）。
+        el.scrollIntoView({ block: 'center', inline: 'center' });
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) return null;
         return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
       })()`)
       if (!box) return false
+      // 滚动后让一帧，等布局稳定再发鼠标事件
+      await sleep(120)
       const base = { x: box.x, y: box.y, button: 'left', clickCount: 1 }
       await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' }, sessionId)
       await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sessionId)
@@ -525,7 +532,85 @@ async function main() {
       return bg === 'rgb(255, 255, 255)' || bg === 'rgba(0, 0, 0, 0)';
     })()`)
     record('行程卡片不是纯白底（双主题可适配）', cardBgIsWhite === false, `纯白=${cardBgIsWhite}`)
+
+    // 本轮改版：卡片变成「横躺的牛皮纸书签」。
+    // 判据取三样：书签类名、右端 V 形缺口（clip-path）、左端穿线孔（::before 的圆点）。
+    // 只查类名是不够的——样式没生效时类名照样在
+    const bookmarkShape = await evaluate(`(() => {
+      const card = document.querySelector('[data-testid="trip-card"]');
+      if (!card) return null;
+      const cs = getComputedStyle(card);
+      return {
+        hasClass: card.classList.contains('bookmark'),
+        clip: cs.clipPath && cs.clipPath !== 'none',
+        // 书签必须明显比原来的大卡片矮，否则「细长」这个诉求就没做到
+        height: Math.round(card.getBoundingClientRect().height),
+        bg: cs.backgroundColor,
+      };
+    })()`)
+    record(
+      '行程卡片渲染成书签（类名 + V 形缺口）',
+      bookmarkShape !== null && bookmarkShape.hasClass && bookmarkShape.clip === true,
+      bookmarkShape ? `clipPath=${bookmarkShape.clip}` : '未找到书签',
+    )
+    record(
+      '书签是细长的（单条高度明显收窄）',
+      bookmarkShape !== null && bookmarkShape.height > 0 && bookmarkShape.height <= 90,
+      bookmarkShape ? `高 ${bookmarkShape.height}px` : '',
+    )
+    // 白天棕 / 黑夜灰：只要求「红绿蓝三通道接近」或「偏暖」二者之一成立，
+    // 不写死具体色值，免得调色时测试先炸
+    const bookmarkTone = await evaluate(`(() => {
+      const card = document.querySelector('[data-testid="trip-card"]');
+      if (!card) return null;
+      const m = getComputedStyle(card).backgroundColor.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+      if (!m) return null;
+      const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      const theme = document.documentElement.dataset.theme;
+      return { r, g, b, theme, warm: r > b, neutral: Math.abs(r - g) <= 12 && Math.abs(g - b) <= 12 };
+    })()`)
+    record(
+      '书签颜色符合主题（白天偏棕 / 黑夜偏灰）',
+      bookmarkTone !== null && (bookmarkTone.theme === 'night' ? bookmarkTone.neutral : bookmarkTone.warm),
+      bookmarkTone
+        ? `theme=${bookmarkTone.theme} rgb(${bookmarkTone.r},${bookmarkTone.g},${bookmarkTone.b})`
+        : '',
+    )
     await shot('p2-triplist.png')
+
+    // 另一套主题也要单独验一次。只测当前主题的话，另一套配色悄悄失效没人会发现——
+    // 而「白天棕、黑夜灰」正是用户明确点名的要求。
+    // 用侧栏那枚 Segmented 切（它不是 button，要点头像里的 label 才生效）
+    await evaluate(`(() => {
+      const opts = [...document.querySelectorAll('[data-testid="theme-toggle"] label')];
+      const target = opts.find(o => window.__norm(o.textContent) === '${bookmarkTone?.theme === 'night' ? '白天' : '黑夜'}');
+      if (target) target.click();
+      return true;
+    })()`)
+    await sleep(1000)
+    const otherTone = await evaluate(`(() => {
+      const card = document.querySelector('[data-testid="trip-card"]');
+      if (!card) return null;
+      const m = getComputedStyle(card).backgroundColor.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+      if (!m) return null;
+      const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      return { r, g, b, theme: document.documentElement.dataset.theme, warm: r > b };
+    })()`)
+    record(
+      '另一套主题下书签配色也正确',
+      otherTone !== null &&
+        (otherTone.theme === 'night' ? Math.abs(otherTone.r - otherTone.b) <= 15 : otherTone.warm),
+      otherTone ? `theme=${otherTone.theme} rgb(${otherTone.r},${otherTone.g},${otherTone.b})` : '',
+    )
+    await shot('p2-triplist-day.png')
+    // 切回原来的主题，后面的截图风格保持一致
+    await evaluate(`(() => {
+      const opts = [...document.querySelectorAll('[data-testid="theme-toggle"] label')];
+      const target = opts.find(o => window.__norm(o.textContent) === '${bookmarkTone?.theme === 'night' ? '黑夜' : '白天'}');
+      if (target) target.click();
+      return true;
+    })()`)
+    await sleep(800)
 
     console.log('\n=== 6. 地图交互：点击标记与拖拽拾取 ===')
     await goto(`${APP_BASE}/trips/new`)
@@ -682,6 +767,67 @@ async function main() {
       )
       record('取消打卡后条目回到未打卡状态', true)
 
+      console.log('\n=== 7.1b 线圈本 + 便利贴 + 胶带（本轮改版） ===')
+      const paperLook = await evaluate(`(() => {
+        const nb = document.querySelector('.notebook');
+        const notes = document.querySelectorAll('.sticky-note');
+        const tapes = document.querySelectorAll('.sticky-tape');
+        const rings = document.querySelectorAll('.notebook-ring');
+        const firstNote = notes[0];
+        return {
+          hasNotebook: Boolean(nb),
+          rings: rings.length,
+          notes: notes.length,
+          tapes: tapes.length,
+          // 每张便利贴顶端两角各一条胶带，所以胶带数应当正好是便利贴数的两倍
+          tapePerNote: notes.length > 0 ? tapes.length / notes.length : 0,
+          noteBg: firstNote ? getComputedStyle(firstNote).backgroundColor : '',
+          noteRotated:
+            firstNote && firstNote.style.getPropertyValue('--tilt') !== '',
+        };
+      })()`)
+      record('每日安排渲染成线圈本', paperLook.hasNotebook === true && paperLook.rings > 0,
+        `线圈 ${paperLook.rings} 个`)
+      record('景点渲染成便利贴', paperLook.notes > 0, `共 ${paperLook.notes} 张`)
+      record(
+        '便利贴顶端两角都贴了胶带',
+        paperLook.notes > 0 && paperLook.tapePerNote === 2,
+        `便利贴 ${paperLook.notes} / 胶带 ${paperLook.tapes}`,
+      )
+      record(
+        '便利贴是淡彩底（不是纯白）',
+        paperLook.noteBg !== '' &&
+          paperLook.noteBg !== 'rgb(255, 255, 255)' &&
+          paperLook.noteBg !== 'rgba(0, 0, 0, 0)',
+        paperLook.noteBg,
+      )
+      await shot('p6-notebook.png')
+
+      console.log('\n=== 7.1c 路线闭环：末站要回到住处（本轮修正） ===')
+      // 判据直接取「末站条目下方是否出现了通往住处的路段」，而不是查说明文案。
+      // 说明文案只在所有路段都规划成功后才渲染，断言很容易跑在路线加载完成之前，
+      // 从而产生假失败（第一版就是这么挂的）。
+      let returnLegOk = false
+      try {
+        await waitFor(
+          `(() => {
+            const items = document.querySelectorAll('[data-testid="trip-item"]');
+            const last = items[items.length - 1];
+            return Boolean(last && last.innerText.includes('返回'));
+          })()`,
+          '末站出现返回住处的路段',
+          40000,
+        )
+        returnLegOk = true
+      } catch {
+        returnLegOk = false
+      }
+      record('末站条目显示「返回住处」的路段（路线闭环）', returnLegOk === true)
+      const stayPinCount = await evaluate(
+        `document.querySelectorAll('.amap-marker').length`,
+      )
+      record('住宿标记仍然只有一个（返程点不重复打钉）', stayPinCount > 0, `共 ${stayPinCount} 个标记`)
+
       console.log('\n=== 7.2 「换一个」候选抽屉（本轮新增） ===')
       // 点第一个条目上的「换一个」，应弹出抽屉并加载候选列表
       const swapClicked = await evaluate(`(() => {
@@ -702,6 +848,14 @@ async function main() {
         `document.querySelector('[data-testid="swap-drawer"]') !== null`,
       )
       record('弹出替换候选抽屉', drawerShown === true)
+
+      // 本轮修正：这个换点按钮属于「当天第一站」，所以它的上一站应当按住宿算。
+      // 之前传的是 null，等于告诉候选筛选「这站没有前置约束」
+      await sleep(600)
+      const stayAnchored = await evaluate(
+        `window.__has('距住处') || window.__has('上一站按住宿算')`,
+      )
+      record('首站换点把住宿当作上一站', stayAnchored === true)
 
       // 候选要么有内容、要么给出可读的「附近没有更合适的」说明，不能空白转圈
       await waitFor(
@@ -907,6 +1061,30 @@ async function main() {
       20000,
     )
     record('清除后标记为「未配置」', true)
+
+    console.log('\n=== 8.5 白天模式下的详情页（补充视觉检查） ===')
+    // 设置页那一段最后停在白天主题，正好借这个时机补一张白天的详情页截图。
+    // 纸质感在白天/黑夜是两套完全不同的取值，只看一套不足以确认
+    await goto(`${APP_BASE}/trips/${detailTripId}`)
+    await evaluate(HELPERS)
+    await waitFor(`document.querySelector('.notebook') !== null`, '线圈本渲染', 25000)
+    const dayPaper = await evaluate(`(() => {
+      const nb = document.querySelector('.notebook');
+      const note = document.querySelector('.sticky-note');
+      if (!nb || !note) return null;
+      return {
+        notebookBg: getComputedStyle(nb).backgroundColor,
+        noteBg: getComputedStyle(note).backgroundColor,
+        theme: document.documentElement.dataset.theme,
+      };
+    })()`)
+    record(
+      '白天模式下线圈本与便利贴正常渲染',
+      dayPaper !== null && dayPaper.theme === 'day',
+      dayPaper ? `theme=${dayPaper.theme} 本子=${dayPaper.notebookBg} 便利贴=${dayPaper.noteBg}` : '',
+    )
+    await sleep(2500)
+    await shot('p6-notebook-day.png')
 
     console.log('\n=== 9. 页面运行时报错检查 ===')
     // 区分「组件弃用提示」与「真正的运行时报错」：

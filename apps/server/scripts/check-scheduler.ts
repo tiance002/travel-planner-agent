@@ -18,10 +18,13 @@ import {
   matchesNightHike,
   matchesThemePark,
   maxSpotsForDay,
+  nightKind,
+  nightKindOfText,
   parseDayTypeBan,
   parseOpenHours,
   resolveDayType,
   resolveIntensity,
+  type NightKind,
 } from '../src/services/agent/spot-rules'
 
 /** 造一个假 POI。typecode 以 05 开头即被判定为餐饮 */
@@ -306,6 +309,21 @@ check('识别节奏轻松', parseDayTypeBan(['行程节奏轻松一些']).relaxe
 check('带老人触发轻松模式', parseDayTypeBan(['带老人']).relaxed, true)
 check('无关需求不误判', parseDayTypeBan(['素食', '自驾']).noHike, false)
 
+console.log('\n--- 夜间活动分类（去重的前提） ---')
+check('酒吧识别', nightKind(poi('B1', '南锣鼓巷酒吧', '080306')), 'bar')
+check('精酿酒吧识别', nightKind(poi('B2', '老城精酿', '080306')), 'bar')
+check('英文 Live House 识别', nightKind(poi('B3', 'Blue Note Live House', '080306')), 'bar')
+check('清吧识别', nightKind(poi('B4', '后海清吧', '080306')), 'bar')
+// 这条是最容易踩的坑：barbecue 里包含 "bar"，卡了词边界才不会误判
+check('烧烤不会被误判成酒吧', nightKind(poi('B5', '张记 Barbecue 烧烤', '050100')), null)
+check('小吃街识别', nightKind(poi('S1', '河坊街小吃街', '110000')), 'snack_street')
+check('夜市识别', nightKind(poi('S2', '西市场夜市', '110000')), 'snack_street')
+check('大排档识别', nightKind(poi('S3', '江边大排档', '050100')), 'snack_street')
+// 单家店不该算成一条街，否则会把正常的餐饮选择也封掉
+check('单家「沙县小吃」不算小吃街', nightKind(poi('S4', '沙县小吃', '050100')), null)
+check('普通景点不参与去重', nightKind(poi('N1', '西湖', '110000')), null)
+check('从文本判断（用于恢复已落库数据）', nightKindOfText('某某夜市'), 'snack_street')
+
 // ---------------------------------------------------------------------------
 // 第三组：走一遍完整 validateDay，验证新规则真的接进了主流程
 // ---------------------------------------------------------------------------
@@ -413,6 +431,60 @@ for (const item of ruleCases) {
     vFailures.push(`${item.name}\n      抛错：${error instanceof Error ? error.message : String(error)}`)
     console.log(`  ✗ ${item.name}（抛错）`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// 第四组：夜间活动去重的跨天传导
+// ---------------------------------------------------------------------------
+
+console.log('\n--- 夜间活动去重（撞了已去过的类别要换掉） ---')
+
+{
+  // BAR_B 刻意放到很远的地方：换点逻辑只在「比原来更近」时才替换，
+  // 都放在同一坐标的话距离相等，会走「换不到 → 保留并提示」那条分支，
+  // 测的就不是我们要测的替换路径了
+  const FAR_BAR = poi('B102', '江边清吧', '080306', { rating: 4.6, lng: 121.9, lat: 31.4 })
+  const LANTERN = poi('N002', '江畔观景台', '110000', { rating: 4.7 })
+  const dedupRegistry = new Map<string, Poi>([
+    ...registry.entries(),
+    [LANTERN.poiId, LANTERN],
+    [FAR_BAR.poiId, FAR_BAR],
+  ])
+
+  // 前面某天已经去过酒吧，这一天晚上又排了一家别的酒吧
+  const { day: planned, warnings } = validateDay(
+    day([
+      { poiId: 'P001', slot: 'morning' },
+      { poiId: 'B102', slot: 'evening' },
+    ]),
+    dedupRegistry,
+    2,
+    { usedNightKinds: new Set<NightKind>(['bar']) },
+  )
+  const names = planned.items.map((entry) => entry.name)
+  check(
+    '撞了去过的酒吧 → 夜里不再出现酒吧',
+    names.filter((name) => nightKindOfText(name) === 'bar').length,
+    0,
+  )
+  check('原来那家酒吧被换掉了', names.includes('江边清吧'), false)
+  check('换点动作有留下说明', warnings.some((w) => w.includes('酒吧')), true)
+
+  // 没有撞上时不该动它：今天还没人去过酒吧
+  const { day: untouched } = validateDay(
+    day([
+      { poiId: 'P001', slot: 'morning' },
+      { poiId: 'B102', slot: 'evening' },
+    ]),
+    dedupRegistry,
+    2,
+    { usedNightKinds: new Set<NightKind>() },
+  )
+  check(
+    '没撞上时酒吧照常保留',
+    untouched.items.some((entry) => entry.name === '江边清吧'),
+    true,
+  )
 }
 
 const totalPass = rulePass + vPass

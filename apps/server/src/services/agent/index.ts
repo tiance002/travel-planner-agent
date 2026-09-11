@@ -39,7 +39,13 @@ import {
   type PlannedDay,
   type RawPlan,
 } from './scheduler'
-import { parseDayTypeBan, type DayType, type Intensity } from './spot-rules'
+import {
+  nightKindOfText,
+  parseDayTypeBan,
+  type DayType,
+  type Intensity,
+  type NightKind,
+} from './spot-rules'
 import { runTool, TOOL_DEFINITIONS, type ToolContext } from './tools'
 
 /** 单天生成的硬超时。一天排不出来就失败，不拖着整趟任务 */
@@ -291,10 +297,17 @@ export async function generateTrip(
   // 跨天去重用两个清单：poiId 用于程序判断，地名用于写进提示词
   const usedPoiIds = new Set<string>()
   const previousPlaces: string[] = []
+
+  // 夜间活动去重：整趟行程只安排一次酒吧、一次小吃街。
+  // 从已落库的天里恢复，续跑时才不会「重生成第 3 天又排一家酒吧」
+  const usedNightKinds = new Set<NightKind>()
+
   for (const day of existing) {
     for (const item of day.items) {
       if (item.poiId) usedPoiIds.add(item.poiId)
       previousPlaces.push(item.name)
+      const kind = nightKindOfText(item.name, item.tag)
+      if (kind) usedNightKinds.add(kind)
     }
   }
 
@@ -374,6 +387,8 @@ export async function generateTrip(
         previousPlaces: previousPlaces.slice(-20),
         // 跨天影响：昨天的天型与强度决定今天该快还是该慢
         previousDayState,
+        // 夜生活去重：把已经去过的类别告诉模型，别再排第二家酒吧
+        usedNightKinds: [...usedNightKinds],
       }),
       tools: TOOL_DEFINITIONS,
       executeTool: (name, args) => runTool(name, args, toolContext),
@@ -403,6 +418,7 @@ export async function generateTrip(
       usedPoiIds,
       ban,
       previousDayState,
+      usedNightKinds,
     })
     for (const warning of warnings) log(`规则修正：${warning}`)
 
@@ -419,11 +435,27 @@ export async function generateTrip(
       )
     }
 
-    // 通勤体检只做这一天：问题当天暴露，且换点时避开前面几天已用的地点
-    const commuteWarnings = await optimizeCommute([day], registry, report, usedPoiIds, ban)
+    // 通勤体检只做这一天：问题当天暴露，且换点时避开前面几天已用的地点。
+    // 传入 anchor.poi 后，体检范围会扩到「住处 → 第一站」与「末站 → 住处」——
+    // anchor 在按天循环之前就定下来了，所以用户自己选的住宿和 AI 推荐的锚点都能覆盖
+    const commuteWarnings = await optimizeCommute(
+      [day],
+      registry,
+      report,
+      usedPoiIds,
+      ban,
+      anchor?.poi ?? null,
+      usedNightKinds,
+    )
     for (const warning of commuteWarnings) log(`通勤体检：${warning}`)
 
     await persistDay(tripId, day, date, cast)
+
+    // 记下这一天用到的夜间活动类别，作为后面几天的去重输入
+    for (const item of day.items) {
+      const kind = nightKindOfText(item.name, item.tag)
+      if (kind) usedNightKinds.add(kind)
+    }
 
     for (const item of day.items) {
       usedPoiIds.add(item.poiId)

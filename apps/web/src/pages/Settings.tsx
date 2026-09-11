@@ -19,7 +19,6 @@ import {
   Avatar,
   Button,
   Card,
-  Descriptions,
   Input,
   Popconfirm,
   Select,
@@ -48,6 +47,7 @@ import {
   type TestResult,
 } from '../api/settings'
 import UserAvatar from '../components/UserAvatar'
+import { FormSection } from '../components/paper'
 
 // 常见厂商预设。选中后自动带出接口地址与候选模型名，
 // 用户也可以全部手填（选择「自定义」即可）。
@@ -310,9 +310,7 @@ export default function Settings() {
         }
         style={{ marginBottom: 16 }}
       >
-        <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
-          <Descriptions.Item label="当前账号">{me?.username ?? '加载中…'}</Descriptions.Item>
-        </Descriptions>
+        <FormSection hint={`当前账号：${me?.username ?? '加载中…'}`}>个人资料</FormSection>
 
         {/* 头像：预设 emoji + 自定义上传 */}
         <Field label="头像" hint="选一个系统形象，或上传自己的图片（会自动裁成方形并压缩）">
@@ -386,6 +384,8 @@ export default function Settings() {
         </Field>
 
         {/* 密码 */}
+        <FormSection hint="改完需要用新密码重新登录">登录安全</FormSection>
+
         <Field label="修改密码" hint="至少 8 位。修改成功后需要用新密码重新登录（当前会话仍有效）">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 320 }}>
             <Input.Password

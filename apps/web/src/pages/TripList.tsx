@@ -1,16 +1,20 @@
 // 我的行程页。
 //
-// 视觉上刻意不用「纯白大卡片 + 灰字」那种最省事的写法：
-// 白底卡片在黑夜模式下会变成一块刺眼的亮斑，在白天模式下又和背景糊成一片。
-// 这里改成——外层是一层极淡的主色底（跟随主题），左侧一个城市缩写色块当视觉锚点，
-// 所有信息改写成胶囊标签，一眼能扫到「去哪、几天、几个人、住哪」。
-// 全部颜色取自 antd token，所以白天/黑夜自动跟着换，不需要写两套。
+// 视觉上把每条行程做成「横躺的牛皮纸书签」：
+//   - 白天是棕色牛皮纸，黑夜是灰色——靠 index.css 里的一套 CSS 变量切换，
+//     组件这里不需要写任何 if (isNight)；
+//   - 右端切一个 V 形口（书签最容易被认出的特征），左端一个穿线孔；
+//   - 细长：一条只占 60 出头的高度，比原来的大卡片能多看好几条。
+//
+// 信息仍然全部保留，只是改成书签上的小字标，颜色用半透明白，
+// 压在任何纸色上都读得清。
 
-import { App, Button, Empty, Popconfirm, Skeleton, Space, Tag, theme, Typography } from 'antd'
+import { App, Button, Empty, Popconfirm, Skeleton, Space, theme, Typography } from 'antd'
 import { CompassOutlined, PlusOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, extractError } from '../api/client'
+import { PaperSheet } from '../components/paper'
 
 interface TripSummary {
   id: string
@@ -24,59 +28,23 @@ interface TripSummary {
   stayName: string | null
 }
 
-// 行程状态对应的说明与色板。色值不写死，交给 antd 的 Tag 语义色处理
-const STATUS_TEXT: Record<string, { label: string; color: string }> = {
-  draft: { label: '草稿', color: 'default' },
-  generating: { label: '生成中', color: 'processing' },
-  ready: { label: '已完成', color: 'success' },
-  failed: { label: '生成失败', color: 'error' },
+/**
+ * 行程状态的圆点颜色。书签是深色牛皮纸，antd 的 Tag 浅底彩字压上去会脏，
+ * 所以状态改成一个色点 + 一行浅字，安静且一定可读。
+ */
+const STATUS_DOT: Record<string, { label: string; dot: string }> = {
+  draft: { label: '草稿', dot: '#c9bda6' },
+  generating: { label: '生成中', dot: '#79b8e8' },
+  ready: { label: '已完成', dot: '#7fd6a8' },
+  failed: { label: '生成失败', dot: '#f0928c' },
 }
 
-/** 取城市名的前两个字当色块文字。中文城市名取两字刚好，英文则截前两位 */
+/** 取城市名的前两个字。中文取两字刚好，英文则截前两位 */
 function cityInitial(cityName: string): string {
   const trimmed = cityName.trim()
   if (!trimmed) return '旅'
-  // 拉丁字母城市名（例如 "Paris"）取前两位并大写
   if (/^[A-Za-z]/.test(trimmed)) return trimmed.slice(0, 2).toUpperCase()
   return trimmed.slice(0, 2)
-}
-
-/**
- * 一枚信息胶囊。行程卡片里的所有信息都用它承载。
- *
- * 为什么手写而不用 antd 的 Tag：Tag 自带的状态色语义不适合「出发日期」
- * 这种中性信息，硬套会得到一堆颜色打架的标签。这里用主题的填充色，
- * 视觉上比 Tag 更安静，也天然适配双主题。
- */
-function Pill({
-  children,
-  icon,
-}: {
-  children: React.ReactNode
-  icon?: React.ReactNode
-}) {
-  const { token } = theme.useToken()
-  return (
-    <span
-      data-testid="trip-pill"
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 5,
-        padding: '3px 10px',
-        borderRadius: 999,
-        fontSize: 12,
-        lineHeight: 1.6,
-        background: token.colorFillQuaternary,
-        border: `1px solid ${token.colorBorderSecondary}`,
-        color: token.colorTextSecondary,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {icon ? <span style={{ fontSize: 12, color: token.colorTextTertiary }}>{icon}</span> : null}
-      {children}
-    </span>
-  )
 }
 
 export default function TripList() {
@@ -85,7 +53,6 @@ export default function TripList() {
   const navigate = useNavigate()
   const [trips, setTrips] = useState<TripSummary[]>([])
   const [loading, setLoading] = useState(true)
-  const [hoveredId, setHoveredId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -120,9 +87,9 @@ export default function TripList() {
   }
 
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto' }}>
+    <div style={{ maxWidth: 900, margin: '0 auto' }}>
       <Space
-        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}
+        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 14 }}
         align="center"
       >
         <Space size={8}>
@@ -139,81 +106,58 @@ export default function TripList() {
       {loading ? (
         <Skeleton active paragraph={{ rows: 6 }} />
       ) : trips.length === 0 ? (
-        <div
-          style={{
-            padding: '48px 24px',
-            borderRadius: token.borderRadiusLG,
-            background: token.colorFillQuaternary,
-            border: `1px dashed ${token.colorBorderSecondary}`,
-          }}
-        >
+        <PaperSheet style={{ padding: '44px 24px' }}>
           <Empty description="还没有行程">
             <Button type="primary" onClick={() => navigate('/trips/new')}>
               创建第一个行程
             </Button>
           </Empty>
-        </div>
+        </PaperSheet>
       ) : (
-        <Space orientation="vertical" size={12} style={{ width: '100%' }}>
+        /* 书签是「夹在本子里」的，所以底下垫一整页纸，而不是让它们飘在背景上 */
+        <PaperSheet
+          style={{
+            padding: '20px 18px 24px 24px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+          }}
+        >
           {trips.map((trip) => {
-            const status = STATUS_TEXT[trip.status] ?? STATUS_TEXT.draft
-            const hovered = hoveredId === trip.id
+            const status = STATUS_DOT[trip.status] ?? STATUS_DOT.draft
             return (
               <div
                 key={trip.id}
+                className="bookmark"
                 data-testid="trip-card"
                 onClick={() => navigate(`/trips/${trip.id}`)}
-                onMouseEnter={() => setHoveredId(trip.id)}
-                onMouseLeave={() => setHoveredId(null)}
-                style={{
-                  display: 'flex',
-                  gap: 14,
-                  padding: 16,
-                  borderRadius: token.borderRadiusLG,
-                  // 底色用极淡的主色填充而不是白色：白天模式偏暖、黑夜模式偏深，
-                  // 两种主题下都不会出现刺眼的亮块
-                  background: token.colorFillQuaternary,
-                  border: `1px solid ${hovered ? token.colorPrimaryBorder : token.colorBorderSecondary}`,
-                  cursor: 'pointer',
-                  transition: 'border-color .2s, box-shadow .2s, transform .2s',
-                  transform: hovered ? 'translateY(-1px)' : 'none',
-                  boxShadow: hovered ? token.boxShadowTertiary : 'none',
-                }}
               >
-                {/* 城市缩写色块：卡片左侧的视觉锚点，比一行灰字更容易扫到 */}
-                <div
-                  style={{
-                    flex: '0 0 52px',
-                    height: 52,
-                    borderRadius: token.borderRadius,
-                    background: token.colorPrimaryBg,
-                    border: `1px solid ${token.colorPrimaryBorder}`,
-                    color: token.colorPrimary,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 16,
-                    fontWeight: 500,
-                    letterSpacing: 1,
-                  }}
+                {/* 城市缩写：书签上的「分类印记」 */}
+                <span
                   data-testid="trip-city-initial"
+                  style={{
+                    flex: '0 0 auto',
+                    minWidth: 40,
+                    textAlign: 'center',
+                    fontSize: 14,
+                    fontWeight: 600,
+                    letterSpacing: 1.5,
+                    color: 'var(--mark-ink)',
+                    borderRight: '1px dashed rgba(255, 255, 255, 0.3)',
+                    paddingRight: 12,
+                  }}
                 >
                   {cityInitial(trip.cityName)}
-                </div>
+                </span>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      marginBottom: 10,
-                    }}
-                  >
+                  {/* 第一行：标题 + 状态 */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                     <Typography.Text
                       strong
                       style={{
-                        fontSize: 15,
+                        fontSize: 14.5,
+                        color: 'var(--mark-ink)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
@@ -221,33 +165,58 @@ export default function TripList() {
                     >
                       {trip.title}
                     </Typography.Text>
-                    <Tag color={status.color} style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+                    <span
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        fontSize: 11.5,
+                        color: 'var(--mark-ink-dim)',
+                        flexShrink: 0,
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: status.dot,
+                          flexShrink: 0,
+                        }}
+                      />
                       {status.label}
-                    </Tag>
+                    </span>
                   </div>
 
-                  {/* 信息全部改成胶囊标签，横向铺开，一眼扫完 */}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    <Pill icon={<span style={{ fontSize: 11 }}>◎</span>}>{trip.cityName}</Pill>
-                    <Pill>{trip.startDate.slice(0, 10)} 出发</Pill>
-                    <Pill>{trip.days} 天</Pill>
-                    <Pill>{trip.travelers} 人</Pill>
-                    <Pill icon={<span style={{ fontSize: 11 }}>⌂</span>}>
+                  {/* 第二行：信息小字标 */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: 5,
+                      marginTop: 4,
+                    }}
+                  >
+                    <span className="bookmark-tag" data-testid="trip-pill">
+                      {trip.cityName}
+                    </span>
+                    <span className="bookmark-tag" data-testid="trip-pill">
+                      {trip.startDate.slice(0, 10)} 出发
+                    </span>
+                    <span className="bookmark-tag" data-testid="trip-pill">
+                      {trip.days} 天
+                    </span>
+                    <span className="bookmark-tag" data-testid="trip-pill">
+                      {trip.travelers} 人
+                    </span>
+                    <span className="bookmark-tag" data-testid="trip-pill">
                       {trip.stayResolved ? (trip.stayName ?? '已选定住宿') : '住宿待定'}
-                    </Pill>
+                    </span>
                   </div>
                 </div>
 
-                {/* stopPropagation：删除是危险动作，不能被卡片整体点击带着跳详情页 */}
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    flexShrink: 0,
-                  }}
-                >
+                {/* stopPropagation：删除是危险动作，不能被书签整体点击带着跳详情页 */}
+                <div onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }}>
                   <Popconfirm
                     title="确定删除这个行程吗？"
                     description="删除后无法恢复，行程中的打卡记录也会一并清除。"
@@ -256,7 +225,11 @@ export default function TripList() {
                     cancelText="取消"
                     onConfirm={() => void handleDelete(trip.id)}
                   >
-                    <Button danger size="small" type="text">
+                    <Button
+                      size="small"
+                      type="text"
+                      style={{ color: 'var(--mark-ink-dim)', fontSize: 12 }}
+                    >
                       删除
                     </Button>
                   </Popconfirm>
@@ -264,7 +237,7 @@ export default function TripList() {
               </div>
             )
           })}
-        </Space>
+        </PaperSheet>
       )}
     </div>
   )

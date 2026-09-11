@@ -9,7 +9,7 @@ import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { generateTrip } from '../services/agent'
 import { findAlternatives } from '../services/agent/alternatives'
-import { parseDayTypeBan } from '../services/agent/spot-rules'
+import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById, type Poi } from '../services/amap'
 
 export const tripsRouter = Router()
@@ -413,8 +413,14 @@ tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) =>
       return
     }
 
-    // 前一个点与后一个点。住宿锚点不算「上一个点」——它是起点，不是游玩地点，
-    // 但仍参与通勤判断：换完之后从住宿出发不能更绕
+    // 前一个点与后一个点。
+    //
+    // 首尾两站要用住宿锚点补位，这是必须的：
+    //   - 第一站的「上一站」就是住处（用户从酒店出门），传 null 等于告诉
+    //     候选筛选「这站没有前置约束」，于是会推荐出离家很远的地方；
+    //   - 最后一站的「下一站」也是住处（要回酒店），漏掉就只优化了去程、
+    //     没管返程。
+    // 顺序上用的是当天条目的序号，住宿不占序号——它只是端点，不是游玩点。
     const ordered = item.tripDay.items
     const position = ordered.findIndex((entry) => entry.id === item.id)
     const prevItem = position > 0 ? ordered[position - 1] : null
@@ -423,23 +429,73 @@ tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) =>
     // 整趟行程已用过的 poiId。跨天去重：不能把一个已经在别的天出现过的地点换进来
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.tripId, userId: req.user!.userId },
-      select: { extraNeeds: true },
+      select: {
+        extraNeeds: true,
+        stayResolved: true,
+        stayPoiId: true,
+        stayName: true,
+        stayLng: true,
+        stayLat: true,
+      },
     })
+
+    // 住宿锚点还原成 POI 形状，只为了喂给通勤计算，所以除坐标外的字段可以留空
+    const stayPoi: Poi | null =
+      trip?.stayResolved &&
+      trip.stayPoiId &&
+      trip.stayLng !== null &&
+      trip.stayLat !== null &&
+      trip.stayLng !== undefined &&
+      trip.stayLat !== undefined
+        ? {
+            poiId: trip.stayPoiId,
+            name: trip.stayName ?? '住宿',
+            lng: trip.stayLng,
+            lat: trip.stayLat,
+            address: '',
+            type: '住宿服务',
+            typecode: '100000',
+            cityName: '',
+            district: '',
+            adcode: '',
+            rating: null,
+            cost: null,
+            tag: '',
+            keytag: '',
+            openTimeToday: '',
+            openTimeWeek: '',
+            tel: '',
+            photos: [],
+            distance: null,
+          }
+        : null
+
     const usedRows = await prisma.tripItem.findMany({
       where: { tripDay: { tripId: req.params.tripId } },
-      select: { poiId: true },
+      select: { poiId: true, name: true, tag: true },
     })
     const usedPoiIds = new Set(
       usedRows.map((row) => row.poiId).filter((id): id is string => Boolean(id)),
     )
 
+    // 夜生活去重：整趟只安排一次酒吧、一次小吃街。
+    // **要排除目标自己**——用户想「把这家酒吧换一家酒吧」是合理诉求，
+    // 若把目标自己算进去，bar 就被自己封掉了，一个酒吧候选都搜不出来。
+    const forbiddenNightKinds = new Set<NightKind>()
+    for (const row of usedRows) {
+      if (row.poiId && row.poiId === item.poiId) continue
+      const kind = nightKindOfText(row.name, row.tag)
+      if (kind) forbiddenNightKinds.add(kind)
+    }
+
     const candidates = await findAlternatives({
       target,
-      previous: prevItem ? toPoiShape(prevItem) : null,
-      next: nextItem ? toPoiShape(nextItem) : null,
+      previous: prevItem ? toPoiShape(prevItem) : stayPoi,
+      next: nextItem ? toPoiShape(nextItem) : stayPoi,
       slot: item.slot,
       usedPoiIds,
       ban: parseDayTypeBan(trip?.extraNeeds ? parseJsonArray(trip.extraNeeds) : []),
+      forbiddenNightKinds,
     })
 
     res.json({ candidates, currentPoiId: item.poiId })

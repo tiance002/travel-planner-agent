@@ -49,6 +49,7 @@ import {
 } from '../api/amap'
 import { api, extractError } from '../api/client'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
+import { FormSection } from '../components/paper'
 
 /** 旅游偏好选项。定成枚举而不是自由文本，AI 的选点倾向才可控。
  *  下拉框用 tags 模式：既可以从这里选，也可以输入列表里没有的自定义偏好 */
@@ -459,6 +460,8 @@ export default function NewTrip() {
               budgetScope: 'per_person',
             }}
           >
+            <FormSection hint="先确定去哪、去几天">行程概况</FormSection>
+
             <Form.Item name="title" label="行程名称（可选）">
               <Input placeholder="留空则自动生成，例如「杭州 3 日行程」" maxLength={60} />
             </Form.Item>
@@ -521,6 +524,8 @@ export default function NewTrip() {
               </Col>
             </Row>
 
+            <FormSection hint="决定 AI 会推荐什么类型的地方">偏好与预算</FormSection>
+
             <Form.Item
               name="preferences"
               label="旅游偏好"
@@ -552,6 +557,8 @@ export default function NewTrip() {
                 </Form.Item>
               </Col>
             </Row>
+
+            <FormSection hint="会作为硬约束交给 AI">额外需求</FormSection>
 
             <Form.Item
               name="extraNeeds"

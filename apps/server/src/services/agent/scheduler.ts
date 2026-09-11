@@ -20,11 +20,14 @@ import {
   checkSlotHours,
   isRatingReject,
   maxSpotsForDay,
+  NIGHT_KIND_LABEL,
+  nightKind,
   resolveDayType,
   resolveIntensity,
   type DayType,
   type DayTypeBan,
   type Intensity,
+  type NightKind,
 } from './spot-rules'
 
 /**
@@ -89,6 +92,14 @@ export interface ValidateDayOptions {
    * 昨天夜爬或爬了一天山，今天就该自动降档成恢复日。
    */
   previousDayState?: { dayType: DayType; intensity: Intensity } | null
+  /**
+   * 前面几天已经安排过的夜间活动类别（酒吧 / 小吃街）。
+   *
+   * 用户的原话是「晚上推荐的景点不要重复有酒吧，或重复有小吃街……酒吧都差不多，
+   * 小吃街也一样，如果要规划去，选其中一次去酒吧，一次去小吃街即可」。
+   * 所以这两类在整趟行程里各只出现一次，靠这个集合跨天累积来实现。
+   */
+  usedNightKinds?: Set<NightKind>
 }
 
 // ---------------------------------------------------------------------------
@@ -866,6 +877,53 @@ export function validateDay(
     if (check.verdict === 'tight') warnings.push(`第 ${dayIndex} 天${check.detail}`)
   }
 
+  // ---- 夜间活动去重：酒吧与小吃街整趟各只去一次 ----------------------------
+  //
+  // 模型的注意力只覆盖「这一天」，它不知道前几晚去过什么，所以提示词里写了
+  // 也未必照做。这里用代码兜住：撞了已去过的类别就换一个同类型、但不是那个
+  // 夜生活类别的替代点；实在换不到就保留，但明确告诉用户。
+  if (options.usedNightKinds && options.usedNightKinds.size > 0) {
+    // 候选要避开「整趟行程已用过」和「当天其他条目」的 poiId，
+    // 否则可能把 A 换成同一天里已有的 B，一天出现两个一样的地点
+    const excludeIds = new Set<string>(options.usedPoiIds ?? [])
+    for (const entry of items) excludeIds.add(entry.poiId)
+
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index]
+      const poi = registry.get(item.poiId)
+      if (!poi) continue
+      const kind = nightKind(poi)
+      if (!kind || !options.usedNightKinds.has(kind)) continue
+
+      const anchor = index > 0 ? registry.get(items[index - 1].poiId) : null
+      // 先把被换掉的那个点从排除集里摘出来，否则它自己会挡住候选池
+      excludeIds.delete(item.poiId)
+      const replacement = anchor
+        ? pickReplacement(anchor, poi, registry, excludeIds, {
+            slot: item.slot,
+            ban,
+            forbiddenNightKinds: options.usedNightKinds,
+          })
+        : null
+
+      if (replacement) {
+        warnings.push(
+          `第 ${dayIndex} 天晚上原本安排的「${poi.name}」也是${NIGHT_KIND_LABEL[kind]}，` +
+            `前面几天已经去过一次，已换成「${replacement.name}」`,
+        )
+        items[index] = toPlannedItem(replacement, item.note, item.slot, item.orderIndex)
+        excludeIds.add(replacement.poiId)
+      } else {
+        // 换不到就留着并说明。直接删掉会让晚上空一块，比重复更糟
+        warnings.push(
+          `第 ${dayIndex} 天晚上安排的「${poi.name}」又是${NIGHT_KIND_LABEL[kind]}，` +
+            `同类夜生活整趟去一次就够，可点条目上的「换一个」自行替换`,
+        )
+        excludeIds.add(item.poiId)
+      }
+    }
+  }
+
   return { day: { dayIndex, summary, items, dayType, intensity }, warnings }
 }
 
@@ -940,6 +998,19 @@ export async function optimizeCommute(
   excludedPoiIds: Set<string> = new Set(),
   /** 用户在额外需求里勾选的天型黑名单，换点时也要尊重 */
   ban: DayTypeBan = {},
+  /**
+   * 住宿锚点。传了它才会体检「住处 → 当天第一站」与「当天最后一站 → 住处」两段。
+   *
+   * 为什么必须补这两段：用户的原话是「路线规划时要考虑到第一站和最后一个地方
+   * 到住处的距离」。原先只体检当天内部的相邻点对，于是会出现
+   * 「早上第一个点离家一小时车程」这种明显不合理、却一路绿灯的排法。
+   */
+  stay: Poi | null = null,
+  /**
+   * 前几天已经安排过的夜间活动类别。换点时一并避开，
+   * 免得「修好了通勤、却把同一类夜间活动引进了两天」。
+   */
+  usedNightKinds: Set<NightKind> = new Set(),
 ): Promise<string[]> {
   const warnings: string[] = []
   const usedPoiIds = new Set<string>(excludedPoiIds)
@@ -947,14 +1018,72 @@ export async function optimizeCommute(
     for (const item of day.items) usedPoiIds.add(item.poiId)
   }
 
-  // 进度文案的分母：相邻点对的总数
-  const total = days.reduce((sum, day) => sum + Math.max(day.items.length - 1, 0), 0)
+  // 本批天内已经用到的夜间类别也要算进去，否则同一天里换点可能换出重复
+  const forbiddenNightKinds = new Set<NightKind>(usedNightKinds)
+  for (const day of days) {
+    for (const item of day.items) {
+      const poi = registry.get(item.poiId)
+      const kind = poi ? nightKind(poi) : null
+      if (kind) forbiddenNightKinds.add(kind)
+    }
+  }
+
+  // 进度文案的分母：当天内部相邻点对 + 有住宿时的首尾两段
+  const total = days.reduce((sum, day) => {
+    const internal = Math.max(day.items.length - 1, 0)
+    const terminals = stay && day.items.length > 0 ? 2 : 0
+    return sum + internal + terminals
+  }, 0)
   let checked = 0
 
   for (const day of days) {
-    for (let index = 1; index < day.items.length; index++) {
-      const previous = day.items[index - 1]
-      const current = day.items[index]
+    const items = day.items
+
+    // ---- ① 去程：住处 → 当天第一站 ----
+    if (stay && items.length > 0) {
+      checked += 1
+      if (total > 0) report(`正在核对通勤路线（${checked}/${total}）`)
+
+      const first = items[0]
+      const firstPoi = asPoi(first, registry)
+      const minutes = await commuteMinutes(stay, firstPoi)
+      first.commuteMinutes = minutes
+
+      if (minutes !== null && minutes > MAX_COMMUTE_MINUTES) {
+        // 换第一站时要同时满足「离住处近」与「离第二站近」，
+        // 否则修好了去程、坏掉了衔接
+        const secondAnchor = items[1] ? asPoi(items[1], registry) : null
+        const replacement = pickReplacement(stay, firstPoi, registry, usedPoiIds, {
+          slot: first.slot,
+          ban,
+          extraAnchor: secondAnchor,
+          forbiddenNightKinds,
+        })
+        if (replacement) {
+          const replacedMinutes = await commuteMinutes(stay, replacement)
+          if (replacedMinutes === null || replacedMinutes <= MAX_COMMUTE_MINUTES) {
+            warnings.push(
+              `第 ${day.dayIndex} 天从住处到「${first.name}」约 ${minutes} 分钟，` +
+                `已换成更近的「${replacement.name}」`,
+            )
+            usedPoiIds.delete(first.poiId)
+            usedPoiIds.add(replacement.poiId)
+            items[0] = toPlannedItem(replacement, first.note, first.slot, first.orderIndex)
+            items[0].commuteMinutes = replacedMinutes
+          }
+        } else {
+          warnings.push(
+            `第 ${day.dayIndex} 天从住处到「${first.name}」需要约 ${minutes} 分钟，` +
+              `超过 ${MAX_COMMUTE_MINUTES} 分钟且没有更合适的替代地点，请留意`,
+          )
+        }
+      }
+    }
+
+    // ---- ② 当天内部的相邻点对 ----
+    for (let index = 1; index < items.length; index++) {
+      const previous = items[index - 1]
+      const current = items[index]
       checked += 1
       if (total > 0) report(`正在核对通勤路线（${checked}/${total}）`)
 
@@ -972,8 +1101,7 @@ export async function optimizeCommute(
         asPoi(current, registry),
         registry,
         usedPoiIds,
-        current.slot,
-        ban,
+        { slot: current.slot, ban, forbiddenNightKinds },
       )
       if (!replacement) {
         warnings.push(
@@ -998,13 +1126,58 @@ export async function optimizeCommute(
 
       usedPoiIds.delete(current.poiId)
       usedPoiIds.add(replacement.poiId)
-      day.items[index] = toPlannedItem(
+      items[index] = toPlannedItem(
         replacement,
         current.note,
         current.slot,
         current.orderIndex,
       )
-      day.items[index].commuteMinutes = replacementMinutes
+      items[index].commuteMinutes = replacementMinutes
+    }
+
+    // ---- ③ 返程：当天最后一站 → 住处 ----
+    if (stay && items.length > 0) {
+      checked += 1
+      if (total > 0) report(`正在核对通勤路线（${checked}/${total}）`)
+
+      const last = items[items.length - 1]
+      const lastPoi = asPoi(last, registry)
+      const minutes = await commuteMinutes(lastPoi, stay)
+
+      if (minutes !== null && minutes > MAX_COMMUTE_MINUTES) {
+        // 换最后一站时同时看「离上一站近」与「离住处近」
+        const prevAnchor = items.length >= 2 ? asPoi(items[items.length - 2], registry) : stay
+        const replacement = pickReplacement(prevAnchor, lastPoi, registry, usedPoiIds, {
+          slot: last.slot,
+          ban,
+          extraAnchor: items.length >= 2 ? stay : null,
+          forbiddenNightKinds,
+        })
+        if (replacement) {
+          // 换完之后返程不能仍然超时，否则等于没换
+          const backMinutes = await commuteMinutes(replacement, stay)
+          if (backMinutes === null || backMinutes <= MAX_COMMUTE_MINUTES) {
+            warnings.push(
+              `第 ${day.dayIndex} 天从「${last.name}」返回住处约 ${minutes} 分钟，` +
+                `末站已换成「${replacement.name}」`,
+            )
+            usedPoiIds.delete(last.poiId)
+            usedPoiIds.add(replacement.poiId)
+            items[items.length - 1] = toPlannedItem(
+              replacement,
+              last.note,
+              last.slot,
+              last.orderIndex,
+            )
+            items[items.length - 1].commuteMinutes = backMinutes
+          }
+        } else {
+          warnings.push(
+            `第 ${day.dayIndex} 天从「${last.name}」返回住处需要约 ${minutes} 分钟，` +
+              `超过 ${MAX_COMMUTE_MINUTES} 分钟，请留意当天收尾的距离`,
+          )
+        }
+      }
     }
   }
 
@@ -1048,10 +1221,28 @@ function asPoi(item: PlannedItem, registry?: Map<string, Poi>): Poi {
   }
 }
 
+/** 换点时要满足的约束。收进一个对象，免得一路往下叠位置参数 */
+interface ReplacementConstraints {
+  /** 目标所在的时段，用于营业时间校验 */
+  slot: string
+  /** 用户的天型黑名单 */
+  ban?: DayTypeBan
+  /**
+   * 第二个距离锚点，用于「这一站要同时离两个点都不远」的场合：
+   *   - 第一站：既离住处近（去程），也离第二站近（衔接）
+   *   - 最后一站：既离上一站近（衔接），也离住处近（返程）
+   * 判据取两段距离的**较大值**——约束是「最差的那一段也不能太远」，
+   * 所以该最小化最大值，而不是求和（求和会让一段极近掩盖另一段极远）。
+   */
+  extraAnchor?: Poi | null
+  /** 不允许再出现的夜间活动类别。撞了已去过的酒吧或小吃街时要排除掉 */
+  forbiddenNightKinds?: Set<NightKind>
+}
+
 /**
- * 挑一个替代地点：未使用过的游览类 POI 里，离上一个点最近的。
+ * 挑一个替代地点：未使用过的游览类 POI 里，离锚点最近的。
  *
- * 现在多了两道必要的筛子——不过滤的话，换点的结果可能比原来更糟：
+ * 筛子逐条都是必要的——不过滤的话，换点的结果可能比原来更糟：
  *   - 评分低于下限的不挑（否则会用一个 3.2 分的小店换掉 4.5 分的景点）
  *   - 当前时段已经关门的不挑（否则会挑到一个去了就关门的地方）
  */
@@ -1060,14 +1251,22 @@ function pickReplacement(
   current: Poi,
   registry: Map<string, Poi>,
   usedPoiIds: Set<string>,
-  slot: string,
-  ban: DayTypeBan = {},
+  constraints: ReplacementConstraints,
 ): Poi | null {
-  const currentDistance = straightLineDistance(previous, current)
+  const { slot, ban = {}, extraAnchor, forbiddenNightKinds } = constraints
+
+  // 距离打分：有第二锚点时取两段的较大值
+  const scoreOf = (candidate: Poi) => {
+    const toPrevious = straightLineDistance(previous, candidate)
+    if (!extraAnchor) return toPrevious
+    return Math.max(toPrevious, straightLineDistance(extraAnchor, candidate))
+  }
+
+  const currentScore = scoreOf(current)
   // 只替换同类型：餐厅换餐厅、景点换景点
   const wantRestaurant = isRestaurant(current)
   let best: Poi | null = null
-  let bestDistance = currentDistance
+  let bestScore = currentScore
 
   for (const poi of registry.values()) {
     if (usedPoiIds.has(poi.poiId)) continue
@@ -1078,11 +1277,16 @@ function pickReplacement(
     if (checkSlotHours(poi, slot, wantRestaurant).verdict === 'closed') continue
     // 用户勾了不爬山，就不要用爬山地点当替代
     if (ban.noHike && matchesHikeKeyword(poi)) continue
+    // 夜间活动去重：已经去过酒吧了，就别再挑一家酒吧
+    if (forbiddenNightKinds && forbiddenNightKinds.size > 0) {
+      const kind = nightKind(poi)
+      if (kind && forbiddenNightKinds.has(kind)) continue
+    }
 
-    const distance = straightLineDistance(previous, poi)
-    if (distance < bestDistance) {
+    const score = scoreOf(poi)
+    if (score < bestScore) {
       best = poi
-      bestDistance = distance
+      bestScore = score
     }
   }
 

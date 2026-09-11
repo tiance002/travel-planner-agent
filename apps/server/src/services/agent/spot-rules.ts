@@ -472,3 +472,55 @@ export function resolveIntensity(dayType: DayType, ban: DayTypeBan = {}): Intens
   if (ban.relaxed) return 'light'
   return DAY_TYPE_INTENSITY[dayType]
 }
+
+// ---------------------------------------------------------------------------
+// 夜间活动分类（去重用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 夜间活动的类别。
+ *
+ * 只区分用户点名的两类。用户的原话是「酒吧都差不多，小吃街也一样，
+ * 如果要规划去，选其中一次去酒吧，一次去小吃街即可」——所以这两类
+ * 在整趟行程里各只该出现一次，其余夜间活动（夜景、演出、散步）不受此限。
+ */
+export type NightKind = 'bar' | 'snack_street'
+
+export const NIGHT_KIND_LABEL: Record<NightKind, string> = {
+  bar: '酒吧',
+  snack_street: '小吃街',
+}
+
+/**
+ * 酒吧与酒馆。带 \b 的词要卡词边界，否则 "barbecue"（烧烤）会被误判成酒吧，
+ * 那会把一整类正常餐厅错误地封掉。
+ */
+const BAR_PATTERN = /酒吧|酒馆|清吧|精酿|小酒馆|live\s*house|\bpub\b|\bbar\b|whisky|威士忌|鸡尾酒/i
+
+/**
+ * 小吃街与夜市。
+ *
+ * 刻意要求「街 / 市 / 城 / 排档」这类词一起出现，
+ * 而不是单看「小吃」——「沙县小吃」是家店，不是一条街，
+ * 把它算成小吃街会把正常的餐饮选择也封掉。
+ */
+const SNACK_STREET_PATTERN = /小吃街|美食街|夜市|食街|小吃城|美食城|大排档|好吃街|夜宵街|小吃一条街/
+
+/** 判断一个地点属于哪类夜间活动。不属于这两类时返回 null，表示不参与去重 */
+export function nightKind(poi: Poi): NightKind | null {
+  return nightKindOfText(poi.name, poi.tag, poi.keytag, poi.type)
+}
+
+/**
+ * 从任意文本片段判断夜间活动类别。
+ *
+ * 单独抽出来是为了给「从已落库的数据恢复」用：数据库里只有 name / tag，
+ * 没有完整的 POI 对象，但判据其实只看文本。
+ */
+export function nightKindOfText(...parts: (string | null | undefined)[]): NightKind | null {
+  const text = parts.filter(Boolean).join(' ')
+  if (SNACK_STREET_PATTERN.test(text)) return 'snack_street'
+  if (BAR_PATTERN.test(text)) return 'bar'
+  return null
+}
+

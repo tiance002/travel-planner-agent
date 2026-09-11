@@ -13,7 +13,13 @@
 
 import { planRoute, searchPoiAround, straightLineDistance, type Poi } from '../amap'
 import { MAX_COMMUTE_MINUTES } from './scheduler'
-import { checkSlotHours, isRatingReject, type DayTypeBan } from './spot-rules'
+import {
+  checkSlotHours,
+  isRatingReject,
+  nightKind,
+  type DayTypeBan,
+  type NightKind,
+} from './spot-rules'
 
 /** 周边搜索的初始半径（米）。找不到足量候选时会逐级放大 */
 const SEARCH_RADII = [1500, 3000, 5000]
@@ -62,6 +68,13 @@ export interface FindAlternativesInput {
   usedPoiIds: Set<string>
   /** 用户的天型黑名单，替换时也要尊重 */
   ban?: DayTypeBan
+  /**
+   * 不允许出现的夜间活动类别（酒吧 / 小吃街）。
+   *
+   * 注意调用方应当**排除掉目标自己**再传进来：用户想「把这家酒吧换一家酒吧」是
+   * 完全合理的诉求，如果按整趟行程来算，目标自己就会把 bar 封掉。
+   */
+  forbiddenNightKinds?: Set<NightKind>
 }
 
 /**
@@ -112,6 +125,11 @@ export async function findAlternatives(
       if (checkSlotHours(poi, input.slot, wantRestaurant).verdict === 'closed') continue
       // 用户勾了不爬山，就不要推爬山地点
       if (input.ban?.noHike && matchesHikeKeyword(poi)) continue
+      // 夜生活去重：已去过酒吧就别再推酒吧（目标自己不算，调用方已排除）
+      if (input.forbiddenNightKinds && input.forbiddenNightKinds.size > 0) {
+        const kind = nightKind(poi)
+        if (kind && input.forbiddenNightKinds.has(kind)) continue
+      }
 
       collect.set(poi.poiId, poi)
     }

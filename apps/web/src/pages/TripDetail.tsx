@@ -49,6 +49,49 @@ import {
   type TripItemData,
 } from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
+import { NotebookRings, StickyNote, useStickyInk } from '../components/paper'
+
+/**
+ * 便利贴上的小标。
+ *
+ * 为什么不用 antd 的 Tag：Tag 自带浅彩底，压在淡彩便利贴上会变成
+ * 「贴纸叠贴纸」，颜色一多就乱。这里改成墨色描边的空标，
+ * 只有「当前目标」给一点主色实底用来抢视线。
+ */
+function NoteTag({
+  children,
+  ink,
+  rule,
+  accent,
+}: {
+  children: React.ReactNode
+  ink: string
+  rule: string
+  /** primary 用主色强调（当前目标），其余一律朴素墨色描边 */
+  accent?: 'primary'
+}) {
+  const { token } = antdTheme.useToken()
+  const isPrimary = accent === 'primary'
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '1px 7px',
+        borderRadius: 4,
+        fontSize: 11.5,
+        lineHeight: 1.75,
+        color: isPrimary ? token.colorPrimary : ink,
+        border: `1px solid ${isPrimary ? token.colorPrimaryBorder : rule}`,
+        background: isPrimary ? token.colorPrimaryBg : 'transparent',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {children}
+    </span>
+  )
+}
 
 /** 时段的中文标签。key 与后端 persistDay 写入的 slot 值一一对应 */
 const SLOT_LABEL: Record<string, string> = {
@@ -295,11 +338,38 @@ export default function TripDetail() {
     return () => window.removeEventListener('resize', syncMapHeight)
   }, [])
 
+  // 线圈本左侧要排多少个金属环。环间距固定 27px，数量跟着本子高度变，
+  // 写死数量会在高屏上稀稀拉拉、矮屏上挤成一条实线
+  const ringCount = useMemo(
+    () => Math.max(8, Math.floor((window.innerHeight - 248) / 27)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mapHeight],
+  )
+
+  // 便利贴的墨色。
+  //
+  // **这个 hook 必须放在下面那两个提前 return 之前。**
+  // React 要求每次渲染的 hook 数量与调用顺序完全一致：一旦放到提前 return 之后，
+  // 第一次渲染（loading）会少走一个 hook、第二次却多走一个，直接抛
+  // 「Rendered more hooks than during the previous render」，整页白屏。
+  const noteInk = useStickyInk()
+
   // --- 当天的派生数据 -----------------------------------------------------------
 
   const day: TripDayData | undefined = useMemo(
     () => trip?.tripDays.find((d) => d.dayIndex === activeDay),
     [trip, activeDay],
+  )
+
+  /**
+   * 便利贴的淡彩按条目在当天的顺序轮换（序号 → 颜色）。
+   *
+   * 用序号而不是随机：随机每次渲染都可能换色，用户滚动时颜色乱跳，看着像 bug。
+   * 同样必须留在提前 return 之前——理由见上面 noteInk 处的说明。
+   */
+  const noteIndex = useMemo(
+    () => new Map((day?.items ?? []).map((item, index) => [item.id, index])),
+    [day],
   )
 
   /** 当天第一个未打卡的条目。它就是「当前目标」，列表和地图都要重点突出 */
@@ -308,16 +378,32 @@ export default function TripDetail() {
     return first?.id ?? null
   }, [day])
 
-  /** 按顺序带坐标的点：住宿锚点在最前，后面是当天各条目 */
+  /** 按顺序带坐标的点：住宿锚点在最前，接着是当天各条目，最后再回到住宿 */
   const coordPoints = useMemo(() => {
     const points: { id: string; name: string; lng: number; lat: number }[] = []
-    if (trip?.stayLng != null && trip?.stayLat != null) {
-      points.push({ id: '__stay__', name: trip.stayName ?? '住宿', lng: trip.stayLng, lat: trip.stayLat })
+    const hasStay = trip?.stayLng != null && trip?.stayLat != null
+    const stayLng = trip?.stayLng
+    const stayLat = trip?.stayLat
+
+    if (hasStay) {
+      points.push({ id: '__stay__', name: trip.stayName ?? '住宿', lng: stayLng!, lat: stayLat! })
     }
     for (const item of day?.items ?? []) {
       if (item.lng != null && item.lat != null) {
         points.push({ id: item.id, name: item.name, lng: item.lng, lat: item.lat })
       }
+    }
+    // 返程段：游玩结束要回住处，路线才是闭环。
+    // 用户明确要求「路线规划要考虑最后一个地方到住处的距离」，不补这一段，
+    // 地图上就永远看不到当天最后一站离家有多远。
+    // id 必须和起点区分开，否则去找「这个点后面那段」时两个住宿点会互相顶掉。
+    if (hasStay && points.length > 1) {
+      points.push({
+        id: '__stay_back__',
+        name: `返回${trip.stayName ?? '住宿'}`,
+        lng: stayLng!,
+        lat: stayLat!,
+      })
     }
     return points
   }, [trip, day])
@@ -611,6 +697,15 @@ export default function TripDetail() {
   const checkedCount = dayItems.filter((item) => item.checkedAt).length
   const groups = groupBySlot(dayItems)
 
+  // 便利贴的墨色与序号在文件上方定义（那里是 hook 区）。
+  // 这里只用它们，不再声明任何 hook —— 本行以下都在提前 return 之后。
+
+  // 「换一个」抽屉要用它把邻站说清楚：首站的上一站是住处，末站的下一站是住处
+  const swapIsFirst = Boolean(swapTarget && dayItems[0]?.id === swapTarget.id)
+  const swapIsLast = Boolean(
+    swapTarget && dayItems.length > 0 && dayItems[dayItems.length - 1].id === swapTarget.id,
+  )
+
   return (
     <div style={{ maxWidth: 1080, margin: '0 auto' }}>
       {/* ---- 行程概要 ---- */}
@@ -665,56 +760,63 @@ export default function TripDetail() {
         </Card>
       ) : (
         <Row gutter={16} align="top">
-          {/* ---- 左列：时段分组列表，独立滚动 ----
-              左右各占 12 格（等宽）：用户要求「标题宽度和每日安排对齐」，
-              11/13 的分法会让两张卡的标题栏一宽一窄，视觉上像没对齐 */}
+          {/* ---- 左列：线圈本。每天的景点是贴在纸页上的便利贴 ----
+              左右各占 12 格（等宽）：两张纸的标题栏宽度必须一致，
+              11/13 的分法会让它们一宽一窄，视觉上像没对齐 */}
           <Col xs={24} lg={12} data-testid="day-column">
-            <Card
-              title="每日安排"
-              // 固定高度 + 内部滚动：外层页面不再整体滚动，右侧地图就始终留在视野里。
-              // 高度 = 视口高度 − 顶栏 − 内容区上下内边距 − 行程概要卡，
-              // 收敛后的值保证一屏能放下，不产生外层滚动条
+            <div
+              className="notebook"
               style={{ height: 'calc(100vh - 248px)', display: 'flex', flexDirection: 'column' }}
-              styles={{
-                body: {
-                  flex: 1,
-                  minHeight: 0,
-                  overflowY: 'auto',
-                  // 滚动条与卡片内边距对齐，避免内容贴边
-                  paddingRight: 12,
-                },
-              }}
-              extra={
-                dayItems.length > 0 && (
+            >
+              {/* 左侧那排金属线圈，让它一眼就是个本子 */}
+              <NotebookRings count={ringCount} />
+
+              {/* 本子的抬头 */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  padding: '16px 18px 6px 0',
+                  flexShrink: 0,
+                }}
+              >
+                <Typography.Title level={5} style={{ margin: 0 }}>
+                  每日安排
+                </Typography.Title>
+                {dayItems.length > 0 && (
                   <Typography.Text type="secondary" data-testid="checkin-progress">
                     已打卡 {checkedCount}/{dayItems.length}
                   </Typography.Text>
-                )
-              }
-            >
-              {/* 天数切换。label 里带日期与当天打卡进度 */}
-              <Space orientation="horizontal" wrap size={6} style={{ marginBottom: 16 }}>
-                {trip.tripDays.map((d) => {
-                  const total = d.items.length
-                  const done = d.items.filter((item) => item.checkedAt).length
-                  const isActive = d.dayIndex === activeDay
-                  return (
-                    <Button
-                      key={d.dayIndex}
-                      size="small"
-                      data-testid={`day-tab-${d.dayIndex}`}
-                      type={isActive ? 'primary' : 'default'}
-                      onClick={() => {
-                        setActiveDay(d.dayIndex)
-                        setSelectedItemId(null)
-                      }}
-                    >
-                      第 {d.dayIndex} 天
-                      {total > 0 && ` · ${done}/${total}`}
-                    </Button>
-                  )
-                })}
-              </Space>
+                )}
+              </div>
+
+              {/* 可滚动区。右边距留够，内容不会贴着纸边 */}
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 20px 0' }}>
+                {/* 天数切换。label 里带日期与当天打卡进度 */}
+                <Space orientation="horizontal" wrap size={6} style={{ marginBottom: 14 }}>
+                  {trip.tripDays.map((d) => {
+                    const total = d.items.length
+                    const done = d.items.filter((item) => item.checkedAt).length
+                    const isActive = d.dayIndex === activeDay
+                    return (
+                      <Button
+                        key={d.dayIndex}
+                        size="small"
+                        data-testid={`day-tab-${d.dayIndex}`}
+                        type={isActive ? 'primary' : 'default'}
+                        onClick={() => {
+                          setActiveDay(d.dayIndex)
+                          setSelectedItemId(null)
+                        }}
+                      >
+                        第 {d.dayIndex} 天
+                        {total > 0 && ` · ${done}/${total}`}
+                      </Button>
+                    )
+                  })}
+                </Space>
 
               {day && (
                 <div style={{ marginBottom: 12 }}>
@@ -761,37 +863,27 @@ export default function TripDetail() {
                       const segment = segmentText(item)
 
                       return (
-                        <div
+                        <StickyNote
                           key={item.id}
+                          index={noteIndex.get(item.id) ?? 0}
                           data-testid="trip-item"
                           data-checked={done ? 'true' : 'false'}
                           onClick={() => selectItem(item)}
                           style={{
-                            margin: '8px 0',
-                            padding: '10px 12px',
-                            borderRadius: token.borderRadius,
-                            // 颜色全部取主题 token：白天/黑夜两套自动适配，
-                            // 写死浅色会在黑夜模式下出现「白底白字」看不见的问题
+                            // 上方留出胶带的位置：胶带是 top:-9px 的，不留就会被标题压住
+                            margin: '17px 0 12px',
+                            padding: '14px 13px 11px',
+                            // 选中的那张用主色描边加粗，告诉用户地图正在跟着它
                             border: isSelected
-                              ? `1px solid ${token.colorPrimary}`
-                              : isTarget
-                                ? `1px solid ${token.colorPrimaryBorder}`
-                                : `1px solid ${token.colorBorderSecondary}`,
-                            // 底色用极淡的主题填充而不是纯白 Card 底：
-                            // 白底在黑夜模式下是一块亮斑，在白天模式下又和背景糊在一起。
-                            // 已打卡的再压一档，视觉上「沉下去」
-                            background: done
-                              ? token.colorFillSecondary
-                              : isSelected
-                                ? token.colorPrimaryBg
-                                : token.colorFillQuaternary,
-                            opacity: done ? 0.68 : 1,
+                              ? `1.5px solid ${noteInk.ink}`
+                              : `1px solid ${noteInk.rule}`,
+                            // 已打卡的便利贴像被翻过去一样压暗
+                            opacity: done ? 0.62 : 1,
                             cursor: 'pointer',
-                            transition: 'all .2s',
                           }}
                         >
                           {/* 标题行：名称 + 一排状态标签 */}
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
                             {/* 打卡状态圆点：未打卡空心 / 已打卡实心带对勾 / 当前目标脉冲 */}
                             {done ? (
                               <span
@@ -826,29 +918,40 @@ export default function TripDetail() {
 
                             <Typography.Text
                               strong
-                              style={{ textDecoration: done ? 'line-through' : undefined }}
+                              style={{
+                                textDecoration: done ? 'line-through' : undefined,
+                                color: noteInk.ink,
+                              }}
                               className="trip-item-title"
                               data-testid="trip-item-title"
                             >
                               {item.name}
                             </Typography.Text>
-                            <Tag color={item.itemType === 'restaurant' ? 'orange' : 'blue'}>
+                            <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
                               {item.itemType === 'restaurant' ? '餐厅' : '景点'}
-                            </Tag>
-                            {isTarget && <Tag color="processing">当前目标</Tag>}
-                            {item.rating && (
-                              <Tag color={Number(item.rating) >= 4.5 ? 'green' : 'default'}>
-                                评分 {item.rating}
-                              </Tag>
+                            </NoteTag>
+                            {isTarget && (
+                              <NoteTag ink={noteInk.ink} rule={noteInk.rule} accent="primary">
+                                当前目标
+                              </NoteTag>
                             )}
-                            {item.cost && <Tag>人均 ¥{item.cost}</Tag>}
+                            {item.rating && (
+                              <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
+                                ★ {item.rating}
+                              </NoteTag>
+                            )}
+                            {item.cost && (
+                              <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
+                                人均 ¥{item.cost}
+                              </NoteTag>
+                            )}
                           </div>
 
                           <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                             {/* 左侧信息区 */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ marginTop: 4 }}>
-                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
                                   {[
                                     item.openTimeText || (item.itemType === 'restaurant' ? '营业时间未知' : null),
                                     item.address,
@@ -861,7 +964,9 @@ export default function TripDetail() {
 
                               {item.note && (
                                 <div style={{ marginTop: 4 }}>
-                                  <Typography.Text style={{ fontSize: 12 }}>{item.note}</Typography.Text>
+                                  <Typography.Text style={{ fontSize: 12, color: noteInk.ink }}>
+                                    {item.note}
+                                  </Typography.Text>
                                 </div>
                               )}
                             </div>
@@ -919,24 +1024,25 @@ export default function TripDetail() {
 
                           {segment && (
                             <div style={{ marginTop: 6 }}>
-                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
                                 ↓ {segment}
                               </Typography.Text>
                             </div>
                           )}
-                        </div>
+                        </StickyNote>
                       )
                     })}
                   </div>
                 ))
               )}
 
-              {dayItems.length > 0 && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  营业时间、价格与开放状态由 AI 整理，请以实际为准。点击条目可在右侧地图定位。
-                </Typography.Text>
-              )}
-            </Card>
+                {dayItems.length > 0 && (
+                  <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
+                    营业时间、价格与开放状态由 AI 整理，请以实际为准。点击条目可在右侧地图定位。
+                  </Typography.Text>
+                )}
+              </div>
+            </div>
           </Col>
 
           {/* ---- 右列：地图联动。整列固定在视口内，滚动时不动 ----
@@ -1008,7 +1114,8 @@ export default function TripDetail() {
                 )}
                 {!routeLoading && !routeWarn && routes.length > 0 && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    路线为高德路径规划的真实道路，非直线距离。{trip.stayName ? `从「${trip.stayName}」出发。` : ''}
+                    路线为高德路径规划的真实道路，非直线距离。
+                    {trip.stayName ? `从「${trip.stayName}」出发，末站后返回住处。` : ''}
                   </Typography.Text>
                 )}
               </div>
@@ -1033,8 +1140,10 @@ export default function TripDetail() {
         data-testid="swap-drawer"
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          以下候选都在可行距离内（与前后两站的通勤不超过 40 分钟），
+          以下候选都在可行距离内（与前后两站的通勤各不超过 40 分钟），
           且评分与营业时间符合这一天的时段要求。换掉后当天顺序不变。
+          {swapIsFirst && ' 这是当天第一站，所以上一站按住宿算。'}
+          {swapIsLast && ' 这是当天最后一站，所以下一站按住宿算（要考虑回程）。'}
         </Typography.Paragraph>
 
         {candidatesLoading && (
@@ -1122,12 +1231,13 @@ export default function TripDetail() {
 
                 <div style={{ marginTop: 4 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {/* 通勤时间是真实路径规划的结果，用户最关心的就是这个 */}
+                    {/* 通勤时间是真实路径规划的结果，用户最关心的就是这个。
+                        首/末站的邻站是住宿，文案要跟着说「住处」，否则用户会以为算错了 */}
                     {candidate.commuteFromPrevMinutes !== null
-                      ? `距上一站约 ${candidate.commuteFromPrevMinutes} 分钟`
-                      : `距上一站约 ${candidate.distanceFromPrevKm} km`}
+                      ? `${swapIsFirst ? '距住处' : '距上一站'}约 ${candidate.commuteFromPrevMinutes} 分钟`
+                      : `${swapIsFirst ? '距住处' : '距上一站'}约 ${candidate.distanceFromPrevKm} km`}
                     {candidate.commuteToNextMinutes !== null &&
-                      ` · 到下一站约 ${candidate.commuteToNextMinutes} 分钟`}
+                      ` · ${swapIsLast ? '回住处' : '到下一站'}约 ${candidate.commuteToNextMinutes} 分钟`}
                   </Typography.Text>
                 </div>
 

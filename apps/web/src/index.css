@@ -118,3 +118,306 @@ body {
   width: 100%;
   max-width: 400px;
 }
+
+/* ==================================================================== */
+/* 纸质手帐材质层                                                        */
+/*                                                                      */
+/* 这一层负责三样东西：纸纹颗粒、线圈本、便利贴+胶带、牛皮纸书签。       */
+/* 全部靠 CSS 画，不引入任何图片素材——素材会随主题、分辨率、打包体积    */
+/* 三个方向一起变复杂，而这三样东西用渐变和内联 SVG 就能做到位。         */
+/* ==================================================================== */
+
+:root {
+  /* 纸纹颗粒：SVG 湍流噪声内联成 data URI。
+     为什么用噪声而不是重复渐变：渐变的重复周期在视网膜屏上会看出「网格感」，
+     噪声是真随机的，铺在纸面上更像纤维。
+     opacity 直接烘进 SVG 里，因此不需要 mix-blend-mode——避免和 antd
+     那些自带 mix-blend / z-index 的组件打架。 */
+  --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
+
+  /* 刚接触桌面的那层「贴地」阴影，纸页都用它 */
+  --paper-lift: 0 1px 2px rgba(110, 92, 56, 0.12), 0 10px 26px rgba(110, 92, 56, 0.1);
+
+  /* 线圈本的纸面与格线 */
+  --nb-paper: #fdf9ef;
+  --nb-rule: rgba(120, 150, 175, 0.2);
+  --nb-margin: rgba(196, 108, 96, 0.42);
+  --nb-ring: #b9ad97;
+  --nb-ring-shine: #e8e0cd;
+
+  /* 便利贴的胶带。半透明偏暖白，像真正的美纹纸胶带 */
+  --tape: rgba(255, 253, 244, 0.62);
+  --tape-edge: rgba(180, 166, 138, 0.34);
+  --tape-shadow: 0 1px 2px rgba(90, 76, 48, 0.12);
+
+  /* 书签的牛皮纸：白天棕色。黑夜那套在下面覆盖 */
+  --mark-top: #9a7a54;
+  --mark-bottom: #6f5236;
+  --mark-edge: rgba(58, 40, 22, 0.34);
+  --mark-ink: #fdf6e8;
+  --mark-ink-dim: rgba(253, 246, 232, 0.72);
+  --mark-hole: rgba(58, 40, 22, 0.42);
+}
+
+:root[data-theme='night'] {
+  --paper-lift: 0 1px 2px rgba(0, 0, 0, 0.45), 0 10px 26px rgba(0, 0, 0, 0.4);
+
+  --nb-paper: #262b33;
+  --nb-rule: rgba(140, 170, 210, 0.13);
+  --nb-margin: rgba(200, 130, 130, 0.3);
+  --nb-ring: #5d6675;
+  --nb-ring-shine: #89949f;
+
+  --tape: rgba(226, 232, 240, 0.16);
+  --tape-edge: rgba(200, 214, 232, 0.2);
+  --tape-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+
+  /* 书签的黑夜版：灰色。同一套变量名，组件侧不用写任何 if */
+  --mark-top: #5c636e;
+  --mark-bottom: #3f454e;
+  --mark-edge: rgba(0, 0, 0, 0.4);
+  --mark-ink: #e8edf3;
+  --mark-ink-dim: rgba(232, 237, 243, 0.68);
+  --mark-hole: rgba(0, 0, 0, 0.42);
+}
+
+/* -------------------------------------------------------------------- */
+/* 纸页：所有 antd 卡片自动获得纸纹。                                    */
+/* !important 是必要的——antd 用 cssinjs 在运行时注入样式，            */
+/* 注入顺序在我们的 index.css 之后，不加 !important 会被它的           */
+/* background 简写属性整个重置掉（简写会连带清掉 background-image）。   */
+/* -------------------------------------------------------------------- */
+.ant-card,
+.paper-sheet {
+  background-image: var(--paper-grain) !important;
+  box-shadow: var(--paper-lift);
+}
+
+/* -------------------------------------------------------------------- */
+/* 牛皮纸书签                                                           */
+/* -------------------------------------------------------------------- */
+
+/* 书签本体。右端用 clip-path 切出 V 形缺口——这是书签最容易被认出的特征，
+   比加个圆角矩形加个图标都要直接。 */
+.bookmark {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* 细长：比常规列表卡片矮不少，一排能多看好几条 */
+  min-height: 48px;
+  padding: 0 34px 0 14px;
+  /* 右端 V 口 */
+  clip-path: polygon(0 0, 100% 0, calc(100% - 15px) 50%, 100% 100%, 0 100%);
+  border-radius: 3px 0 0 3px;
+  /* 牛皮纸有方向性的纤维，用 115° 的斜向渐变比纯色更有纸感。
+     渐变之外还要给一个 background-color 兜底——裁剪后如果只剩渐变，
+     取计算样式会得到透明的底色，任何依赖底色判断的逻辑都会误判。 */
+  background-color: var(--mark-bottom);
+  background-image: linear-gradient(115deg, var(--mark-top), var(--mark-bottom));
+  color: var(--mark-ink);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+  box-shadow: 0 1px 2px var(--mark-edge), 0 6px 16px rgba(60, 44, 24, 0.16);
+  will-change: transform;
+}
+
+.bookmark:hover {
+  transform: translateX(3px);
+  filter: brightness(1.07);
+  box-shadow: 0 2px 4px var(--mark-edge), 0 12px 26px rgba(60, 44, 24, 0.24);
+}
+
+/* 左端的穿线孔 + 露出来的线头。书签的第二个识别特征 */
+.bookmark::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--mark-hole);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35);
+}
+
+/* 书签上的一层高光斜纹，让它看起来是有厚度的纸而不是一块色板 */
+.bookmark::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14),
+    rgba(255, 255, 255, 0) 42%,
+    rgba(0, 0, 0, 0.1)
+  );
+}
+
+/* 书签上的信息标。比正文小一号，用半透明白，保证压在任何纸色上都可读 */
+.bookmark-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--mark-ink-dim);
+  background: rgba(255, 255, 255, 0.13);
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------- */
+/* 线圈本                                                               */
+/* -------------------------------------------------------------------- */
+
+.notebook {
+  position: relative;
+  /* 左边留出线圈与页边线的位置 */
+  padding-left: 54px;
+  border-radius: 3px 14px 14px 3px;
+  background-color: var(--nb-paper);
+  background-image:
+    var(--paper-grain),
+    repeating-linear-gradient(
+      180deg,
+      transparent 0 30px,
+      var(--nb-rule) 30px 31px
+    );
+  box-shadow: var(--paper-lift);
+  /* 注意：这里不能加 overflow:hidden。线圈是定位在 left:-9px 的，
+     一旦裁剪就整个消失；圆角本身不影响背景的绘制范围，用不着裁。 */
+}
+
+/* 页边红线。真笔记本印刷上就有，是「本子」最省力的信号 */
+.notebook::before {
+  content: '';
+  position: absolute;
+  left: 44px;
+  top: 0;
+  bottom: 0;
+  width: 1.5px;
+  background: var(--nb-margin);
+}
+
+/* 左侧的线圈环。每个环都要「穿」过纸边，所以定位在纸张左边缘上 */
+.notebook-rings {
+  position: absolute;
+  left: -9px;
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  align-items: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.notebook-ring {
+  width: 27px;
+  height: 13px;
+  border-radius: 999px;
+  /* 金属线圈：上浅下深，模拟圆环受光 */
+  background: linear-gradient(180deg, var(--nb-ring-shine), var(--nb-ring));
+  box-shadow:
+    inset 0 -1.5px 1px rgba(0, 0, 0, 0.22),
+    0 1px 2px rgba(60, 50, 30, 0.22);
+}
+
+/* -------------------------------------------------------------------- */
+/* 便利贴                                                               */
+/*                                                                      */
+/* 用 --tilt 变量承载倾斜角，而不是把 transform 写在行内样式里：        */
+/* 行内 transform 的优先级最高，hover 状态就再也盖不掉它，便利贴        */
+/* 也就永远不会「贴正」。                                               */
+/* -------------------------------------------------------------------- */
+
+.sticky-note {
+  position: relative;
+  border-radius: 3px;
+  /* 便利贴是压在纸页上的，所以阴影要比纸页强一档，才能看出浮起 */
+  box-shadow: 0 1px 2px rgba(90, 76, 48, 0.16), 0 7px 16px rgba(90, 76, 48, 0.13);
+  transform: rotate(var(--tilt, 0deg));
+  transform-origin: 50% 8%;
+  transition: transform 0.2s cubic-bezier(0.34, 1.4, 0.64, 1), box-shadow 0.2s ease;
+}
+
+.sticky-note:hover {
+  /* 被手指按平的感觉：转正、微微抬起、阴影收紧 */
+  transform: rotate(0deg) translateY(-2px);
+  box-shadow: 0 2px 4px rgba(90, 76, 48, 0.18), 0 12px 24px rgba(90, 76, 48, 0.2);
+}
+
+:root[data-theme='night'] .sticky-note {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 7px 16px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-theme='night'] .sticky-note:hover {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.44), 0 12px 24px rgba(0, 0, 0, 0.46);
+}
+
+/* 便利贴顶端两角的胶带。半透明，压在纸边上方，所以要允许溢出 */
+.sticky-tape {
+  position: absolute;
+  top: -9px;
+  width: 46px;
+  height: 17px;
+  background: var(--tape);
+  border-left: 1px dashed var(--tape-edge);
+  border-right: 1px dashed var(--tape-edge);
+  box-shadow: var(--tape-shadow);
+  pointer-events: none;
+}
+
+.sticky-tape-left {
+  left: 8px;
+  transform: rotate(-37deg);
+}
+
+.sticky-tape-right {
+  right: 8px;
+  transform: rotate(37deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bookmark,
+  .sticky-note {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/* 表单：让录入区像「印在纸上的表格」，而不是一堆白色方块               */
+/*                                                                      */
+/* 背景色由 token 的 colorBgContainer 统一改成纸色，这里只需要处理       */
+/* 层次与形状：字段名加重、说明文字收小、控件描边统一圆角。              */
+/* -------------------------------------------------------------------- */
+
+.ant-form-item-label > label {
+  /* 字段名当作印刷标题处理：加重一点点就够，不必放大 */
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.ant-form-item-extra {
+  /* 说明文字收小并压低对比，避免和字段名抢注意力 */
+  font-size: 12px;
+  margin-top: 5px;
+}
+
+/* 控件统一成同一档圆角，避免输入框、日期、下拉各自一个形状 */
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-picker,
+.ant-select .ant-select-content,
+.ant-btn {
+  border-radius: 9px;
+}
+
+
