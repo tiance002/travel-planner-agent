@@ -393,6 +393,28 @@ export async function searchPoiAround(options: PoiAroundOptions): Promise<Poi[]>
   })
 }
 
+/**
+ * 按 poiId 拉取 POI 详情里的照片。
+ *
+ * 为什么需要这个接口：详情页照片在行程生成时从搜索结果里顺带保存，
+ * 但照片功能上线之前的旧行程落库时 photos 为空；前端检测到没有照片时
+ * 会按 poiId 来这里兜底补一次。结果按地理编码同级缓存 24 小时——
+ * 景点照片几乎不变，没必要反复请求。
+ */
+export async function getPoiPhotos(poiId: string): Promise<string[]> {
+  return cached(`poi-photos:${poiId}`, TTL.geocode, async () => {
+    const json = await call<AmapEnvelope & { pois?: { photos?: { url?: string }[] }[] }>('/v5/place/detail', {
+      id: poiId,
+      show_fields: 'photos',
+    })
+    return (json.pois?.[0]?.photos ?? [])
+      .map((p) => p.url ?? '')
+      .filter((u) => u.startsWith('http'))
+      .map((u) => u.replace(/^http:\/\//, 'https://'))
+      .slice(0, 3)
+  })
+}
+
 // ---------------------------------------------------------------------------
 // 天气
 // ---------------------------------------------------------------------------

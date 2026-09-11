@@ -27,11 +27,12 @@ import {
   Tag,
   Typography,
 } from 'antd'
+import { theme as antdTheme } from 'antd'
 import { BookOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { planRoute, type RouteMode, type RouteResult } from '../api/amap'
+import { fetchPoiPhotos, planRoute, type RouteMode, type RouteResult } from '../api/amap'
 import { api, extractError } from '../api/client'
 import {
   checkinItem,
@@ -93,10 +94,42 @@ function openXiaohongshu(placeName: string) {
   )
 }
 
-/** 景点照片：右侧 84px 方图。无图时给一个柔和渐变占位，保持卡片视觉整齐 */
+/** poiId → 补查到的照片。模块级缓存：翻页/切天回来不用重复请求 */
+const poiPhotoCache = new Map<string, string[]>()
+
+/**
+ * 景点照片：右侧 84px 方图。
+ * 取图顺序：行程里存的 photos（生成时高德搜索顺带返回）
+ * → 按 poiId 兜底查一次详情照片（照片功能上线前的旧行程没有存图，靠这个补上）
+ * → 都没有时给柔和渐变占位，保持卡片视觉整齐。
+ */
 function ItemPhoto({ item }: { item: TripItemData }) {
+  const { token } = antdTheme.useToken()
   const [failed, setFailed] = useState(false)
-  const photo = item.photos?.[0]
+  const [extra, setExtra] = useState<string[] | null>(
+    item.poiId ? poiPhotoCache.get(item.poiId) ?? null : null,
+  )
+
+  useEffect(() => {
+    // 已有内嵌照片、或连 poiId 都没有（AI 推荐区域这类无坐标条目）就不用兜底
+    if ((item.photos?.length ?? 0) > 0 || !item.poiId) return
+    if (poiPhotoCache.has(item.poiId)) {
+      setExtra(poiPhotoCache.get(item.poiId) ?? [])
+      return
+    }
+    let cancelled = false
+    fetchPoiPhotos(item.poiId)
+      .then((photos) => {
+        poiPhotoCache.set(item.poiId!, photos)
+        if (!cancelled) setExtra(photos)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [item.photos, item.poiId])
+
+  const photo = item.photos?.[0] ?? extra?.[0]
 
   if (!photo || failed) {
     return (
@@ -111,10 +144,8 @@ function ItemPhoto({ item }: { item: TripItemData }) {
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: 30,
-          background:
-            item.itemType === 'restaurant'
-              ? 'linear-gradient(135deg, #ffe9d6, #ffd8c2)'
-              : 'linear-gradient(135deg, #ddf3ea, #c8e8dc)',
+          // 用主题色填充：白天淡绿、黑夜自动变成柔和的深色块，不刺眼
+          background: token.colorFillSecondary,
         }}
       >
         {item.itemType === 'restaurant' ? '🍜' : '🏞️'}
@@ -144,6 +175,8 @@ export default function TripDetail() {
   const { id = '' } = useParams()
   const { message } = App.useApp()
   const navigate = useNavigate()
+  // antd 的主题 token：拿当前主题下的颜色值，保证白天/黑夜都协调
+  const { token } = antdTheme.useToken()
 
   const [trip, setTrip] = useState<TripDetailData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -582,12 +615,18 @@ export default function TripDetail() {
                             margin: '8px 0',
                             padding: '10px 12px',
                             borderRadius: 8,
+                            // 颜色全部取主题 token：白天/黑夜两套自动适配，
+                            // 写死浅色会在黑夜模式下出现「白底白字」看不见的问题
                             border: isSelected
-                              ? '1px solid #1677ff'
+                              ? `1px solid ${token.colorPrimary}`
                               : isTarget
-                                ? '1px solid #69b1ff'
-                                : '1px solid #f0f0f0',
-                            background: done ? '#fafafa' : isSelected ? '#e6f4ff' : '#fff',
+                                ? `1px solid ${token.colorPrimaryBorder}`
+                                : `1px solid ${token.colorBorderSecondary}`,
+                            background: done
+                              ? token.colorFillQuaternary
+                              : isSelected
+                                ? token.colorPrimaryBg
+                                : token.colorBgContainer,
                             opacity: done ? 0.68 : 1,
                             cursor: 'pointer',
                             transition: 'all .2s',
@@ -619,7 +658,7 @@ export default function TripDetail() {
                                   width: 12,
                                   height: 12,
                                   borderRadius: '50%',
-                                  border: '2px solid #1677ff',
+                                  border: `2px solid ${token.colorPrimary}`,
                                   flexShrink: 0,
                                   animation: isTarget ? 'amap-pulse 1.6s ease-out infinite' : undefined,
                                 }}

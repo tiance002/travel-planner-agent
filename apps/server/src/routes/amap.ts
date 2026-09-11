@@ -20,6 +20,7 @@ import {
   regeocode,
   searchPoiAround,
   searchPoiText,
+  getPoiPhotos,
 } from '../services/amap'
 
 export const amapRouter = Router()
@@ -164,6 +165,25 @@ amapRouter.get(
     }
     const pois = await searchPoiAround(parsed.data)
     res.json({ pois })
+  }),
+)
+
+// POI 照片兜底：按 poiId 查详情照片。给照片功能上线前的旧行程补图用。
+// 照片是装饰性信息，查不到时返回空数组即可，不该让页面报错
+amapRouter.get(
+  '/poi/photos',
+  route(async (req, res) => {
+    const poiId = String(req.query.poiId ?? '').trim()
+    if (!poiId || poiId.length > 32) {
+      res.status(400).json({ error: '缺少合法的 poiId' })
+      return
+    }
+    try {
+      const photos = await getPoiPhotos(poiId)
+      res.json({ photos })
+    } catch {
+      res.json({ photos: [] })
+    }
   }),
 )
 

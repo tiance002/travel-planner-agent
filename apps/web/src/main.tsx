@@ -33,9 +33,9 @@ function ThemedConfigProvider({ children }: { children: React.ReactNode }) {
         },
         components: {
           Layout: {
-            // 左侧栏与顶栏跟页面底色保持接近，避免生硬的色块分割
-            siderBg: isNight ? '#121a2b' : '#fbfaf5',
-            headerBg: isNight ? '#121a2b' : '#fbfaf5',
+            // 侧栏与顶栏的背景交给 index.css 的毛玻璃类控制，这里保持透明
+            siderBg: 'transparent',
+            headerBg: 'transparent',
           },
           Menu: {
             // 菜单选中项也用主色系，视觉统一

@@ -136,6 +136,14 @@ export async function getWeather(adcode: string): Promise<WeatherResult | null> 
   return data.weather
 }
 
+/** 按 poiId 兜底查 POI 详情照片（给旧行程条目补图用）。查不到返回空数组 */
+export async function fetchPoiPhotos(poiId: string): Promise<string[]> {
+  const { data } = await api.get<{ photos: string[] }>('/amap/poi/photos', {
+    params: { poiId },
+  })
+  return data.photos
+}
+
 /** 路径规划，返回真实距离、耗时与可绘制的路线折线 */
 export async function planRoute(params: {
   mode: RouteMode

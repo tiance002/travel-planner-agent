@@ -1,12 +1,13 @@
 // 登录后的整体框架：左侧导航、顶部用户信息、右侧内容区。
 // 具体页面通过 react-router 的 Outlet 渲染进内容区。
 //
-// 悠闲风的界面约定：左侧栏带图标、底部有「外观」切换（白天/黑夜），
-// 顶栏显示用户头像。改名/换头像后通过 me-updated 事件立刻刷新显示。
+// 布局约定：
+//   - 整个框架锁定在一屏高（100vh）里：左侧栏永远固定可见，只有右侧内容区滚动。
+//     这样菜单与底部的「外观」切换始终同屏，不会跟着内容一起滚走。
+//   - 左侧栏与顶栏用半透明毛玻璃：动漫风背景图从底下透出来，界面不显得死板。
 
 import {
   CarryOutOutlined,
-  CompassOutlined,
   MoonOutlined,
   PlusCircleOutlined,
   SettingOutlined,
@@ -66,17 +67,19 @@ export default function AppLayout() {
   }
 
   return (
-    <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
-      <Sider theme="light" width={200} style={{ borderRadius: '0 16px 16px 0', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100%' }}>
-          <div style={{ padding: '20px 16px 12px', fontSize: 16, fontWeight: 600 }}>
-            🌿 旅游规划助手
+    // 锁定一屏高：内容区自己滚动，左侧栏（含外观切换）永远固定可见
+    <Layout style={{ height: '100vh', overflow: 'hidden', background: 'transparent' }}>
+      <Sider width={212} theme="light" className="app-sider">
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          {/* 顶部横幅：当前主题的风景插画 + 应用名 */}
+          <div className="app-banner">
+            <span className="app-banner-title">🌿 旅游规划助手</span>
           </div>
 
           <Menu
             mode="inline"
             selectedKeys={[selectedKey]}
-            style={{ borderInlineEnd: 'none', flex: 1 }}
+            style={{ borderInlineEnd: 'none', flex: 1, background: 'transparent' }}
             items={[
               { key: 'trips', icon: <CarryOutOutlined />, label: <Link to="/trips">我的行程</Link> },
               { key: 'new', icon: <PlusCircleOutlined />, label: <Link to="/trips/new">新建行程</Link> },
@@ -84,9 +87,9 @@ export default function AppLayout() {
             ]}
           />
 
-          {/* 外观切换：白天 = 明亮悠闲，黑夜 = 星夜月光。选择会被记住 */}
-          <div style={{ padding: '12px 16px 16px' }}>
-            <Divider style={{ margin: '0 0 12px' }} plain>
+          {/* 外观切换：白天 = 明亮悠闲，黑夜 = 星夜月光。与菜单同屏、固定不滚动 */}
+          <div style={{ padding: '10px 14px 14px' }}>
+            <Divider style={{ margin: '0 0 10px' }} plain>
               外观
             </Divider>
             <Segmented
@@ -103,25 +106,19 @@ export default function AppLayout() {
         </div>
       </Sider>
 
-      <Layout style={{ background: 'transparent' }}>
-        <Header
-          style={{
-            paddingInline: 24,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'flex-end',
-          }}
-        >
+      <Layout style={{ height: '100vh', background: 'transparent' }}>
+        <Header className="app-header">
           <Space size={12}>
             <UserAvatar avatar={me?.avatar} username={me?.username} size={32} />
-            <Typography.Text type="secondary">{me?.username ?? '未登录'}</Typography.Text>
+            <Typography.Text>{me?.username ?? '未登录'}</Typography.Text>
             <Button size="small" onClick={handleLogout}>
               退出登录
             </Button>
           </Space>
         </Header>
 
-        <Content style={{ padding: 24 }}>
+        {/* 只有这里滚动：左侧栏与顶栏固定 */}
+        <Content style={{ overflowY: 'auto', padding: '20px 24px 32px' }}>
           <Outlet />
         </Content>
       </Layout>

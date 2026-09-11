@@ -19,44 +19,88 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* 白天主题：明亮、轻盈、悠闲、自由 —— 暖米色天空感，轻云缓移          */
+/* 两套主题的页面背景：动漫旅行插画打底，叠一层同色薄纱保证文字可读。  */
+/* 插画是 AI 生成的场景图，白天 = 湖畔小镇水彩风，黑夜 = 星河月夜。    */
 /* ------------------------------------------------------------------ */
 
 :root[data-theme='day'] body {
   color: #2b3a33;
   background:
-    /* 几朵「云」：大而淡的白色光斑，营造轻盈的天空感 */
-    radial-gradient(1100px 420px at 12% -8%, rgba(255, 255, 255, 0.9), transparent 60%),
-    radial-gradient(900px 380px at 88% 4%, rgba(214, 236, 222, 0.75), transparent 62%),
-    radial-gradient(700px 460px at 55% 110%, rgba(250, 233, 199, 0.55), transparent 65%),
-    linear-gradient(180deg, #f2f7f1 0%, #f8f5ec 52%, #f4efe3 100%);
-  background-attachment: fixed;
+    linear-gradient(180deg, rgba(248, 247, 240, 0.55), rgba(248, 247, 240, 0.68)),
+    url('/bg-day.jpg') center / cover no-repeat fixed;
 }
-
-/* ------------------------------------------------------------------ */
-/* 黑夜主题：宁静、星夜与月光下 —— 深夜蓝底 + 星点 + 一抹月色          */
-/* ------------------------------------------------------------------ */
 
 :root[data-theme='night'] body {
   color: #d8e2f0;
   background:
-    /* 星光：几组细小的白色光点，用径向渐变模拟 */
-    radial-gradient(1.5px 1.5px at 22% 18%, rgba(255, 255, 255, 0.9), transparent 100%),
-    radial-gradient(1px 1px at 68% 9%, rgba(255, 255, 255, 0.8), transparent 100%),
-    radial-gradient(1.2px 1.2px at 82% 26%, rgba(255, 255, 255, 0.7), transparent 100%),
-    radial-gradient(1px 1px at 41% 32%, rgba(255, 255, 255, 0.65), transparent 100%),
-    radial-gradient(1.6px 1.6px at 12% 44%, rgba(255, 255, 255, 0.75), transparent 100%),
-    radial-gradient(1px 1px at 57% 52%, rgba(255, 255, 255, 0.55), transparent 100%),
-    radial-gradient(1.3px 1.3px at 91% 60%, rgba(255, 255, 255, 0.7), transparent 100%),
-    radial-gradient(1px 1px at 33% 7%, rgba(255, 255, 255, 0.6), transparent 100%),
-    /* 月光：左上角一弯淡蓝色的光晕 */
-    radial-gradient(620px 380px at 78% -6%, rgba(150, 172, 224, 0.28), transparent 60%),
-    radial-gradient(900px 520px at -10% 108%, rgba(84, 110, 173, 0.22), transparent 62%),
-    linear-gradient(180deg, #0e1522 0%, #101a2c 48%, #0d1320 100%);
-  background-attachment: fixed;
+    linear-gradient(180deg, rgba(11, 17, 29, 0.62), rgba(11, 17, 29, 0.74)),
+    url('/bg-night.jpg') center / cover no-repeat fixed;
 }
 
-/* 黑夜下把登录页等处遗留的白色底图统一收进夜色 */
+/* ------------------------------------------------------------------ */
+/* 左侧栏与顶栏：毛玻璃质感，让背景插画从底下透出来                    */
+/* ------------------------------------------------------------------ */
+
+.app-sider {
+  /* antd 组件自带的背景要用 !important 压掉 */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(250, 248, 240, 0.7)) !important;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-right: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 4px 0 24px rgba(90, 110, 90, 0.08);
+}
+
+:root[data-theme='night'] .app-sider {
+  background: linear-gradient(180deg, rgba(20, 28, 46, 0.78), rgba(13, 19, 32, 0.82)) !important;
+  border-right: 1px solid rgba(125, 155, 232, 0.16);
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-inline: 24px;
+  background: rgba(255, 255, 255, 0.55) !important;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+:root[data-theme='night'] .app-header {
+  background: rgba(18, 26, 43, 0.6) !important;
+  border-bottom: 1px solid rgba(125, 155, 232, 0.14);
+}
+
+/* 侧栏顶部的风景横幅：随主题换插画，应用名叠在左下角 */
+.app-banner {
+  position: relative;
+  height: 108px;
+  margin: 12px 12px 6px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: url('/bg-day.jpg') center 32% / cover no-repeat;
+  box-shadow: 0 4px 14px rgba(90, 110, 90, 0.18);
+}
+
+:root[data-theme='night'] .app-banner {
+  background-image: url('/bg-night.jpg');
+  background-position: center 24%;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+.app-banner-title {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+  letter-spacing: 0.5px;
+}
+
+/* 黑夜下把 antd Layout 自带的底色收掉，露出背景插画 */
 :root[data-theme='night'] .ant-layout {
   background: transparent;
 }
