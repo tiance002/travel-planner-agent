@@ -4,8 +4,11 @@
 // 通过页面点按钮调试一次成本太高。这里直接调服务端函数，
 // 能在终端看到每一次工具调用和最终产出，排查最快。
 //
-// 用法（须在 apps/server 目录下执行）：
-//   npx tsx scripts/try-generate.ts [用户名] [天数]
+// 用法（二选一）：
+//   在项目根目录：npm run try:generate -- [用户名] [天数]
+//   在 apps/server 目录：npx tsx scripts/try-generate.ts [用户名] [天数]
+//
+// 注意别站在 apps 目录下敲路径 —— 脚本在 apps/server/scripts 里，不是 apps/scripts。
 
 import { prisma } from '../src/db'
 import { generateTrip } from '../src/services/agent'

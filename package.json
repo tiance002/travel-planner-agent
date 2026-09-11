@@ -13,6 +13,9 @@
     "db:migrate": "npm run db:migrate -w @travel/server",
     "db:studio": "npm run db:studio -w @travel/server",
     "smoke": "node tools/smoke.mjs",
+    "try:generate": "npm run try:generate -w @travel/server --",
+    "check:credential": "npm run check:credential -w @travel/server --",
+    "check:parser": "npm run check:parser -w @travel/server",
     "build": "npm run build -w @travel/server && npm run build -w @travel/web"
   },
   "devDependencies": {

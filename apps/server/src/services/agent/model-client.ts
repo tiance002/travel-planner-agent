@@ -43,12 +43,36 @@ export interface ChatRequest {
 export interface ChatResponse {
   content: string
   toolCalls: ToolCall[]
+  /**
+   * 模型这次为什么停下。取值与含义：
+   *   stop      正常说完
+   *   length    撞到了「单次回复字数上限」，内容被**截断**了
+   *   tool_calls 它要求调用工具
+   *
+   * 这个字段以前被丢掉了，代价很大：模型输出到一半被截断时，
+   * 我们只能看到「JSON 解析失败」，无从判断到底是模型写错了格式还是话没说完。
+   */
+  finishReason: string
   usage?: { prompt: number; completion: number }
 }
 
 // 单次请求的超时。工具调用阶段模型回复通常很快，
 // 但要求它一次性输出整条行程的 JSON 时会慢一些，所以给得比测试连接宽松。
 const DEFAULT_TIMEOUT_MS = 90_000
+
+/**
+ * 单次回复允许的最大输出长度（token 数）。
+ *
+ * 为什么不省略这个参数：省略时用的是各厂商**各自的默认值**，
+ * 而 DeepSeek 的默认值只有 4096。一条两天的行程 JSON，
+ * 光把每个地点的推荐理由写详细些就很容易超过这个数——
+ * 结果就是 JSON 被从中间截断，解析必然失败。
+ * 这种失败还很「随机」：模型这次话少就过了，下次话多就挂，最难排查。
+ *
+ * 8192 是 DeepSeek 允许的上限。换用其他厂商时若报参数超限，
+ * 可用环境变量 MODEL_MAX_OUTPUT_TOKENS 调小。
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.MODEL_MAX_OUTPUT_TOKENS ?? 8192)
 
 /** 发起一次对话请求。出错时抛出带中文说明的 Error */
 export async function chatCompletion(request: ChatRequest): Promise<ChatResponse> {
@@ -59,6 +83,8 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
     model: request.credentials.modelName,
     messages: request.messages,
     stream: false,
+    // 始终显式指定，别交给厂商默认值决定——默认值往往是截断的源头
+    max_tokens: request.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
   }
   if (request.tools && request.tools.length > 0) {
     body.tools = request.tools
@@ -66,9 +92,6 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
   }
   if (request.jsonMode) {
     body.response_format = { type: 'json_object' }
-  }
-  if (request.maxTokens) {
-    body.max_tokens = request.maxTokens
   }
 
   let response: Response
@@ -98,7 +121,10 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
   }
 
   let payload: {
-    choices?: { message?: { content?: string | null; tool_calls?: ToolCall[] } }[]
+    choices?: {
+      message?: { content?: string | null; tool_calls?: ToolCall[] }
+      finish_reason?: string
+    }[]
     error?: { message?: string }
     usage?: { prompt_tokens?: number; completion_tokens?: number }
   }
@@ -112,7 +138,8 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
     throw new Error(`模型返回错误：${payload.error.message ?? '未知原因'}`)
   }
 
-  const message = payload.choices?.[0]?.message
+  const choice = payload.choices?.[0]
+  const message = choice?.message
   if (!message) {
     throw new Error('模型没有返回任何内容')
   }
@@ -120,6 +147,7 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
   return {
     content: message.content ?? '',
     toolCalls: message.tool_calls ?? [],
+    finishReason: choice?.finish_reason ?? 'unknown',
     usage: payload.usage
       ? { prompt: payload.usage.prompt_tokens ?? 0, completion: payload.usage.completion_tokens ?? 0 }
       : undefined,
@@ -152,6 +180,8 @@ export interface ToolLoopResult {
   messages: ChatMessage[]
   rounds: number
   toolCallCount: number
+  /** 最后一条回复的结束原因，length 说明被截断了 */
+  finishReason: string
 }
 
 /**
@@ -186,7 +216,13 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
 
     // 不再请求工具，说明模型认为信息够了，这一条就是最终答案
     if (reply.toolCalls.length === 0) {
-      return { content: reply.content, messages, rounds: round, toolCallCount }
+      return {
+        content: reply.content,
+        messages,
+        rounds: round,
+        toolCallCount,
+        finishReason: reply.finishReason,
+      }
     }
 
     for (const call of reply.toolCalls) {
@@ -202,4 +238,64 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
   }
 
   throw new Error(`模型在 ${maxRounds} 轮内仍未给出最终方案，可能陷入了反复调用工具`)
+}
+
+/**
+ * 让模型把最终答案重新输出一遍。
+ *
+ * 为什么需要这一步：模型偶尔会把话说「毛边」——JSON 前后带解释、字符串里有没转义的换行、
+ * 或者干脆写到一半撞上长度上限被截断。遇到这种情况，
+ * 最省事的做法不是重跑一遍全部工具查询（那要几十秒、还把高德配额再烧一次），
+ * 而是**保留已有对话，只追加一句提醒**，让它重说一遍。
+ *
+ * 两个刻意的设计：
+ *   - 这一轮**不带工具**。工具一旦在场，模型就有机会又跑去调工具而不给出最终答案。
+ *   - 开启 jsonMode（response_format=json_object），由接口层面强制它只输出 JSON，
+ *     比在提示词里反复叮嘱可靠得多。注意：该参数要求提示词里出现 json 字样，
+ *     所以下面的提醒语里必须包含「JSON」。
+ */
+export async function reaskForJson(options: {
+  credentials: ModelCredentials
+  messages: ChatMessage[]
+  /** 上一次失败的具体原因，会原样转达给模型，让它知道该改什么 */
+  feedback: string
+  /** 让模型收敛篇幅，用于「上次被截断」的情形 */
+  askShorter?: boolean
+  log?: (line: string) => void
+}): Promise<{ content: string; messages: ChatMessage[]; finishReason: string }> {
+  const parts = [
+    `你上一条回复不能被解析，原因：${options.feedback}`,
+    '',
+    '请重新输出最终结果，要求：',
+    '1. 只输出一个 JSON 对象，不要任何解释文字，不要 Markdown 代码块；',
+    '2. 字符串内部不要出现未转义的换行与引号；',
+    '3. 地点只能使用此前工具返回过的 poiId。',
+  ]
+  if (options.askShorter) {
+    parts.push(
+      '4. 上一次输出因超出长度上限被截断，这次请**明显缩短**每个地点的 note 与每天的 summary',
+      '   （note 控制在 30 字以内），优先保证 JSON 结构完整。',
+    )
+  }
+
+  const messages: ChatMessage[] = [
+    ...options.messages,
+    { role: 'user', content: parts.join('\n') },
+  ]
+
+  options.log?.('模型上一条输出不是合法 JSON，正在请它重新输出（不重跑工具查询）')
+
+  const reply = await chatCompletion({
+    credentials: options.credentials,
+    messages,
+    jsonMode: true,
+  })
+
+  messages.push({
+    role: 'assistant',
+    content: reply.content || null,
+    ...(reply.toolCalls.length > 0 ? { tool_calls: reply.toolCalls } : {}),
+  })
+
+  return { content: reply.content, messages, finishReason: reply.finishReason }
 }

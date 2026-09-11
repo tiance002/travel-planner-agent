@@ -29,6 +29,9 @@ apps/server/src/generated/
 npm-debug.log*
 yarn-error.log*
 
+# 生成失败时存档的模型原始输出（排查用，不入库）
+.debug/
+
 # 编辑器与系统
 .vscode/*
 !.vscode/extensions.json

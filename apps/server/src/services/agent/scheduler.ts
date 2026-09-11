@@ -68,34 +68,292 @@ interface RawDay {
   items?: unknown
 }
 
-interface RawPlan {
+export interface RawPlan {
   stay?: { poiId?: unknown; name?: unknown; reason?: unknown }
   days?: unknown
 }
 
 /**
+ * 解析失败时抛出。比普通的 Error 多带两个信息，方便上层决定怎么补救：
+ *   - truncated：是不是「话没说完」被截断了（对应重新输出时要它缩短篇幅）
+ *   - snippet：模型当时写到哪里，直接打进日志，省得再复现一次
+ */
+export class PlanParseError extends Error {
+  readonly truncated: boolean
+  readonly snippet: string
+
+  constructor(message: string, detail: { truncated: boolean; snippet: string }) {
+    super(message)
+    this.name = 'PlanParseError'
+    this.truncated = detail.truncated
+    this.snippet = detail.snippet
+  }
+}
+
+/**
  * 把模型返回的文本解析成 JSON。
- * 模型经常会顺手包一层 ```json 代码块，或者前后加几句客套话，
- * 这里统一剥掉再解析，减少无谓的重试。
+ *
+ * 模型输出失手的花样比想象中多，这里按「从轻到重」依次尝试三种解析方式，
+ * 能救回的都救回，救不了的才抛错：
+ *   1. 原样解析：剥掉 Markdown 代码块和前后废话后直接 parse（覆盖九成情况）
+ *   2. 修小毛病：字符串里有没转义的换行、对象末尾多了个逗号
+ *   3. 截断修复：输出到一半撞上长度上限，最后一个地点写到一半就断了
  */
 export function parsePlanJson(text: string): RawPlan {
-  const cleaned = text
-    .trim()
-    .replace(/^```(?:json)?/i, '')
-    .replace(/```$/, '')
-    .trim()
+  const cleaned = stripWrappers(text ?? '')
+  const scan = extractJsonObject(cleaned)
 
-  const start = cleaned.indexOf('{')
-  const end = cleaned.lastIndexOf('}')
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error('模型没有按要求输出 JSON')
+  // 1) 原样解析
+  if (scan.text) {
+    const direct = tryParse(scan.text)
+    if (direct) return direct
+
+    // 2) 修掉未转义的控制字符与多余的尾逗号，再试一次
+    const repaired = stripTrailingCommas(escapeControlCharsInStrings(scan.text))
+    const afterRepair = tryParse(repaired)
+    if (afterRepair) return afterRepair
+
+    // 3) 截断修复：丢掉最后一个残缺片段，补齐未闭合的括号
+    const patched = closeTruncatedJson(repaired)
+    const afterPatch = patched ? tryParse(patched) : null
+    if (afterPatch) return afterPatch
   }
 
+  const raw = text ?? ''
+  throw new PlanParseError(
+    scan.text
+      ? '模型输出的 JSON 无法解析'
+      : '模型没有按要求输出 JSON（回复里找不到 JSON 对象）',
+    {
+      truncated: !scan.closed,
+      snippet: raw.slice(-300),
+    },
+  )
+}
+
+/** 尽力而为的解析：失败返回 null，不抛错 */
+function tryParse(text: string): RawPlan | null {
   try {
-    return JSON.parse(cleaned.slice(start, end + 1)) as RawPlan
+    const value = JSON.parse(text)
+    return value && typeof value === 'object' ? (value as RawPlan) : null
   } catch {
-    throw new Error('模型输出的 JSON 无法解析')
+    return null
   }
+}
+
+/** 剥掉 BOM、Markdown 代码块围栏与首尾空白 */
+function stripWrappers(text: string): string {
+  return text
+    .replace(/^\uFEFF/, '')
+    .replace(/```[a-zA-Z]*/g, '')
+    .replace(/```/g, '')
+    .trim()
+}
+
+interface ScanResult {
+  /** 从第一个 { 开始的片段；没找到则为 null */
+  text: string | null
+  /** 这段片段括号是否配平。false 基本等同于「输出被截断」 */
+  closed: boolean
+}
+
+/**
+ * 从混杂文本里切出第一个完整的 JSON 对象。
+ *
+ * 为什么不用 indexOf('{') + lastIndexOf('}') 这种省事写法：
+ * 地点名称、推荐理由里完全可能带上花括号，而且模型可能在 JSON 后面又补一段解释，
+ * 前后一刀切很可能切出半截。这里用括号栈逐字符扫描，能正确跳过字符串内部，
+ * 顺带还能判断出是不是压根没闭合（被截断了）。
+ */
+function extractJsonObject(text: string): ScanResult {
+  const start = text.indexOf('{')
+  if (start === -1) return { text: null, closed: false }
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+
+    if (ch === '"') inString = true
+    else if (ch === '{' || ch === '[') depth++
+    else if (ch === '}' || ch === ']') {
+      depth--
+      if (depth === 0) return { text: text.slice(start, i + 1), closed: true }
+    }
+  }
+
+  // 扫到结尾还没闭合：把剩下的都交出去，由后面的修复逻辑处理
+  return { text: text.slice(start), closed: false }
+}
+
+/**
+ * 把 JSON 字符串**内部**未转义的换行、制表符等控制字符转义掉。
+ *
+ * JSON 规范不允许字符串里出现裸的换行，但模型写中文长句时特别容易直接敲回车，
+ * 于是整段 JSON 就废了。这个函数只动字符串内部，字符串外的空白保持原样
+ * （字符串外的换行本来就是合法空白，乱转义反而会把 JSON 弄坏）。
+ */
+function escapeControlCharsInStrings(text: string): string {
+  let out = ''
+  let inString = false
+  let escaped = false
+
+  for (const ch of text) {
+    if (!inString) {
+      out += ch
+      if (ch === '"') inString = true
+      continue
+    }
+
+    if (escaped) {
+      out += ch
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      out += ch
+      escaped = true
+      continue
+    }
+    if (ch === '"') {
+      out += ch
+      inString = false
+      continue
+    }
+
+    const code = ch.codePointAt(0) ?? 0
+    if (code < 0x20) {
+      out +=
+        ch === '\n'
+          ? '\\n'
+          : ch === '\r'
+            ? '\\r'
+            : ch === '\t'
+              ? '\\t'
+              : `\\u${code.toString(16).padStart(4, '0')}`
+      continue
+    }
+    out += ch
+  }
+
+  return out
+}
+
+/** 去掉 ], } 之前多余的逗号（形如 [1,2,] 这种，JSON 规范里不合法） */
+function stripTrailingCommas(text: string): string {
+  let out = ''
+  let inString = false
+  let escaped = false
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+
+    if (inString) {
+      out += ch
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      out += ch
+      continue
+    }
+
+    if (ch === ',') {
+      // 往后看一眼：只要后面第一个有效字符是收尾括号，这个逗号就是多余的
+      let j = i + 1
+      while (j < text.length && /\s/.test(text[j]!)) j++
+      if (text[j] === '}' || text[j] === ']') continue
+    }
+
+    out += ch
+  }
+
+  return out
+}
+
+/**
+ * 截断修复：退回最后一个完整结束的位置，再把没闭合的括号补上。
+ *
+ * 类比：一页纸被裁掉了下半截，我们就在最后一个完整的句子处收尾，
+ * 然后给没写完的段落补上句号。丢掉的是最后那个半截的地点，
+ * 比起整趟行程都失败，这个代价小得多。
+ */
+function closeTruncatedJson(text: string): string | null {
+  if (!text.startsWith('{')) return null
+
+  // 找一个「刚好结束一个完整值」的位置：字符串闭合处（且不是键名），或收尾括号处
+  let inString = false
+  let escaped = false
+  let lastComplete = -1
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') {
+        inString = false
+        // 字符串闭合了，但它可能是「键名」而不是「值」——判据是紧跟其后是否冒号：
+        //   "note": "..."  → 这里的 "note" 是键名，值还没写出来，不能算一个完整的值
+        //   "slot": "morning", → 这里的 "morning" 是值，可以在此收尾
+        // 这个区分很关键：漏掉它，截断在字符串中间时就会把 head 切在冒号后面，
+        // 反而拼出一个仍然不完整的 JSON。
+        let j = i + 1
+        while (j < text.length && /\s/.test(text[j]!)) j++
+        if (text[j] !== ':') lastComplete = i + 1
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '}' || ch === ']') lastComplete = i + 1
+  }
+
+  if (lastComplete <= 0) return null
+
+  const head = text.slice(0, lastComplete).replace(/[,\s]+$/, '')
+  const need = unclosedContainers(head)
+  if (need === null) return null
+  if (need.length === 0) return head
+
+  // 开启顺序是反的，倒着补：{ 补 }，[ 补 ]
+  return head + need.reverse().map((open) => (open === '{' ? '}' : ']')).join('')
+}
+
+/** 扫描文本里尚未闭合的 { [ 列表，按开启顺序返回；字符串没闭合时返回 null */
+function unclosedContainers(text: string): string[] | null {
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') inString = true
+    else if (ch === '{' || ch === '[') stack.push(ch)
+    else if (ch === '}' || ch === ']') stack.pop()
+  }
+
+  return inString ? null : stack
 }
 
 // ---------------------------------------------------------------------------

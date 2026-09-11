@@ -10,12 +10,21 @@
 //
 // 整个过程是异步的：接口立刻返回，页面轮询进度，不会让浏览器干等几分钟。
 
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import { prisma } from '../../db'
 import { getWeather, type Poi } from '../amap'
-import { getCredentialsForUser } from '../llm'
-import { runToolLoop } from './model-client'
+import { getCredentialsForUser, type ModelCredentials } from '../llm'
+import { reaskForJson, runToolLoop, type ChatMessage } from './model-client'
 import { buildSystemPrompt, buildUserPrompt } from './prompt'
-import { optimizeCommute, parsePlanJson, validatePlan, type PlanResult } from './scheduler'
+import {
+  optimizeCommute,
+  parsePlanJson,
+  PlanParseError,
+  validatePlan,
+  type PlanResult,
+  type RawPlan,
+} from './scheduler'
 import { runTool, TOOL_DEFINITIONS, type ToolContext } from './tools'
 
 /** 整轮生成的硬超时。超过就判定失败，避免任务永远挂在 generating */
@@ -53,6 +62,115 @@ function createReporter(tripId: string) {
     void prisma.trip
       .update({ where: { id: tripId }, data: { genProgress: text } })
       .catch(() => undefined)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 最终方案的解析与补救
+// ---------------------------------------------------------------------------
+
+/**
+ * 解析模型的最终输出；失败时带着原因请模型重新输出一次，再不行才报错。
+ *
+ * 为什么要留这一次机会：模型输出 JSON 是有随机性的，同一份提示词，
+ * 这次把话说毛了（多一句解释、漏一个转义、写到一半被截断），下次可能就正常。
+ * 直接判失败等于把这点随机性全部转嫁给用户——他只会看到「生成失败」，
+ * 而重试一次的成本只是多一次对话请求（不用重跑工具查询和高德配额）。
+ */
+async function resolvePlanJson(input: {
+  tripId: string
+  credentials: ModelCredentials
+  messages: ChatMessage[]
+  content: string
+  finishReason: string
+  log: (line: string) => void
+}): Promise<RawPlan> {
+  try {
+    return parsePlanJson(input.content)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    // 两种线索任一成立，就按「被截断」处理：解析器发现括号没配平，或接口直接报告撞了长度上限
+    const truncated =
+      (error instanceof PlanParseError && error.truncated) || input.finishReason === 'length'
+
+    await dumpRawOutput(input.tripId, 'plan-raw-1', input.content, {
+      finishReason: input.finishReason,
+      truncated,
+      reason,
+      snippet: error instanceof PlanParseError ? error.snippet : '',
+    })
+
+    input.log(`最终输出解析失败（${reason}；truncated=${truncated}），请模型重新输出一次`)
+
+    const retry = await reaskForJson({
+      credentials: input.credentials,
+      messages: input.messages,
+      feedback: reason,
+      askShorter: truncated,
+      log: input.log,
+    })
+
+    try {
+      const raw = parsePlanJson(retry.content)
+      input.log('模型重新输出成功，继续校验')
+      return raw
+    } catch (secondError) {
+      const secondReason = secondError instanceof Error ? secondError.message : String(secondError)
+      await dumpRawOutput(input.tripId, 'plan-raw-2', retry.content, {
+        finishReason: retry.finishReason,
+        truncated: secondError instanceof PlanParseError && secondError.truncated,
+        reason: secondReason,
+        snippet: secondError instanceof PlanParseError ? secondError.snippet : '',
+      })
+
+      throw new GenerateError(
+        `模型连续两次都没能给出可用的行程数据（${secondReason}）。` +
+          `这通常与行程天数偏多、或所选模型输出能力有限有关：` +
+          `可以稍后重试，或在「个人设置」里换用输出更稳定的模型。` +
+          `原始输出已留存在 apps/server/.debug/ 下，便于定位。`,
+      )
+    }
+  }
+}
+
+/**
+ * 把模型的原始输出落盘存档。
+ *
+ * 这类失败最难的地方在于「事后无法复现」——重跑一次模型可能就又正常了。
+ * 把原始回复连同结束原因一起写进文件，下次再遇到同样的报错，
+ * 直接打开 .debug 目录就能看到模型当时到底写了什么。目录已在 .gitignore 里。
+ */
+async function dumpRawOutput(
+  tripId: string,
+  tag: string,
+  content: string,
+  meta: { finishReason: string; truncated: boolean; reason: string; snippet: string },
+): Promise<void> {
+  try {
+    // 这里用 import.meta.dirname（源码所在目录）而不是 process.cwd()，
+    // 保证不管从哪个目录启动服务，存档都落在同一个地方
+    const dir = path.resolve(import.meta.dirname, '../../../.debug')
+    await fs.mkdir(dir, { recursive: true })
+    const file = path.join(dir, `${tripId}-${tag}.txt`)
+
+    const header = [
+      `行程：${tripId}`,
+      `时间：${new Date().toISOString()}`,
+      `模型结束原因：${meta.finishReason}（length 表示被截断）`,
+      `是否判定为截断：${meta.truncated}`,
+      `解析错误：${meta.reason}`,
+      meta.snippet ? `失败片段（尾部）：\n${meta.snippet}` : '',
+      '',
+      '===== 模型原始输出（未做任何加工）=====',
+      '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+
+    await fs.writeFile(file, header + content, 'utf8')
+    console.log(`[生成 ${tripId}] 原始输出已存档：${file}`)
+  } catch {
+    // 存档失败不该把生成流程也带崩，静默忽略
   }
 }
 
@@ -120,8 +238,15 @@ export async function generateTrip(tripId: string): Promise<void> {
 
   report('正在整理行程安排')
 
-  // 解析 + 按规则修正
-  const raw = parsePlanJson(result.content)
+  // 解析 + 按规则修正。解析这一步最容易出意外，所以单独包了一层补救逻辑
+  const raw = await resolvePlanJson({
+    tripId,
+    credentials,
+    messages: result.messages,
+    content: result.content,
+    finishReason: result.finishReason,
+    log: (line) => console.log(`[生成 ${tripId}] ${line}`),
+  })
   const plan = validatePlan(raw, registry, trip.days)
 
   // 通勤体检（会消耗高德路径规划配额，所以放在修正之后、落库之前）
