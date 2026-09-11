@@ -85,7 +85,56 @@ const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.MODEL_MAX_OUTPUT_TOKENS ?? 
  */
 const DEFAULT_TEMPERATURE = 0.3
 
-/** 发起一次对话请求。出错时抛出带中文说明的 Error */
+/** 网络层可重试的错误：连接中断、超时、上游 5xx、限频 429 */
+class RetryableModelError extends Error {}
+
+const MAX_RETRIES = 2
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 发一次请求并读回文本。网络与上游临时性故障抛 RetryableModelError，业务错误抛普通 Error */
+async function requestOnce(request: ChatRequest, body: Record<string, unknown>, timeoutMs: number): Promise<string> {
+  const baseUrl = request.credentials.baseUrl.replace(/\/+$/, '')
+
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${request.credentials.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (error) {
+    const isTimeout = error instanceof Error && error.name === 'TimeoutError'
+    throw new RetryableModelError(
+      isTimeout
+        ? `模型响应超时（超过 ${Math.round(timeoutMs / 1000)} 秒）`
+        : `无法连接模型接口 ${baseUrl}，请检查网络与接口地址`,
+    )
+  }
+
+  // 先读文本再解析：网关报错时经常返回 HTML，直接 .json() 会抛出与真实原因无关的错误
+  const rawText = await response.text().catch(() => {
+    throw new RetryableModelError(`模型接口连接中断（HTTP ${response.status}）`)
+  })
+
+  if (!response.ok) {
+    // 5xx 与 429 是上游临时性故障，值得重试；4xx（如 Key 无效）重试没有意义
+    if (response.status >= 500 || response.status === 429) {
+      throw new RetryableModelError(describeHttpError(response.status, rawText, baseUrl))
+    }
+    throw new Error(describeHttpError(response.status, rawText, baseUrl))
+  }
+
+  return rawText
+}
+
+/** 发起一次对话请求。网络层失败自动重试最多 2 次；出错时抛出带中文说明的 Error */
 export async function chatCompletion(request: ChatRequest): Promise<ChatResponse> {
   const baseUrl = request.credentials.baseUrl.replace(/\/+$/, '')
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -107,30 +156,19 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
     body.response_format = { type: 'json_object' }
   }
 
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${request.credentials.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-  } catch (error) {
-    const isTimeout = error instanceof Error && error.name === 'TimeoutError'
-    throw new Error(
-      isTimeout
-        ? `模型响应超时（超过 ${Math.round(timeoutMs / 1000)} 秒）`
-        : `无法连接模型接口 ${baseUrl}，请检查网络与接口地址`,
-    )
-  }
-
-  // 先读文本再解析：网关报错时经常返回 HTML，直接 .json() 会抛出与真实原因无关的错误
-  const rawText = await response.text()
-  if (!response.ok) {
-    throw new Error(describeHttpError(response.status, rawText, baseUrl))
+  // 重试只覆盖网络层故障。请求失败意味着对话没有任何推进，原样重发即可，不需要特殊处理
+  let rawText: string | undefined
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      rawText = await requestOnce(request, body, timeoutMs)
+      break
+    } catch (error) {
+      if (error instanceof RetryableModelError && attempt < MAX_RETRIES) {
+        await sleep(600 * (attempt + 1))
+        continue
+      }
+      throw error
+    }
   }
 
   let payload: {
@@ -141,8 +179,9 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
     error?: { message?: string }
     usage?: { prompt_tokens?: number; completion_tokens?: number }
   }
+  // 能走到这里说明重试循环成功返回过，rawText 一定有值
   try {
-    payload = JSON.parse(rawText)
+    payload = JSON.parse(rawText as string)
   } catch {
     throw new Error('模型返回的内容不是标准 JSON，可能是接口地址填错了')
   }

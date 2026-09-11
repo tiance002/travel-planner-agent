@@ -93,7 +93,12 @@ export default function TripList() {
           {trips.map((trip) => {
             const status = STATUS_TEXT[trip.status] ?? STATUS_TEXT.draft
             return (
-              <Card key={trip.id} hoverable>
+              <Card
+                key={trip.id}
+                hoverable
+                data-testid="trip-card"
+                onClick={() => navigate(`/trips/${trip.id}`)}
+              >
                 <Space
                   style={{ width: '100%', justifyContent: 'space-between' }}
                   align="start"
@@ -120,18 +125,24 @@ export default function TripList() {
                     </div>
                   </div>
 
-                  <Popconfirm
-                    title="确定删除这个行程吗？"
-                    description="删除后无法恢复，行程中的打卡记录也会一并清除。"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    cancelText="取消"
-                    onConfirm={() => void handleDelete(trip.id)}
-                  >
-                    <Button danger size="small" type="text">
-                      删除
+                  {/* stopPropagation：删除是危险动作，不能被卡片整体点击带着跳详情页 */}
+                  <Space onClick={(e) => e.stopPropagation()}>
+                    <Button size="small" type="link" onClick={() => navigate(`/trips/${trip.id}`)}>
+                      查看详情
                     </Button>
-                  </Popconfirm>
+                    <Popconfirm
+                      title="确定删除这个行程吗？"
+                      description="删除后无法恢复，行程中的打卡记录也会一并清除。"
+                      okText="删除"
+                      okButtonProps={{ danger: true }}
+                      cancelText="取消"
+                      onConfirm={() => void handleDelete(trip.id)}
+                    >
+                      <Button danger size="small" type="text">
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  </Space>
                 </Space>
               </Card>
             )

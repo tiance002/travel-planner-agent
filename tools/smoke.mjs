@@ -416,6 +416,12 @@ async function main() {
     )
     record('第三步出现「开始生成行程」按钮', true)
 
+    // P5 详情页测试要用这一步创建的行程 id，页面的 Descriptions 里能直接抓到
+    const detailTripId = await evaluate(
+      `(document.body.innerText.match(/行程编号\\s*([0-9a-f-]{36})/) || [])[1] || ''`,
+    )
+    record('拿到待测详情页的行程编号', detailTripId.length === 36, detailTripId)
+
     const generateClicked = await evaluate(`window.__clickButton('开始生成行程')`)
     record('点击「开始生成行程」', generateClicked === true)
 
@@ -444,16 +450,107 @@ async function main() {
       await waitFor(
         `(((document.querySelector('[data-testid="gen-status"]') || {}).innerText) || '').includes('已生成')`,
         '行程生成完成',
-        300000,
+        480000,
       )
       record('行程生成完成，状态变为「已生成」', true)
 
       const bannerOk = await evaluate(`window.__has('行程已生成完成')`)
       record('页面显示生成成功提示', bannerOk === true)
       await shot('p4-generated.png')
+
+      console.log('\n=== 7.1 行程详情页：时段分组、打卡与地图联动（P5） ===')
+      await goto(`${APP_BASE}/trips/${detailTripId}`)
+      await evaluate(HELPERS)
+      await waitFor(`window.__has('每日安排')`, '详情页渲染', 30000)
+
+      const hasDays = await evaluate(`window.__has('第 1 天')`)
+      record('详情页出现天数切换', hasDays === true)
+      const hasGroup = await evaluate(
+        `window.__has('上午') || window.__has('中午') || window.__has('下午') || window.__has('晚上')`,
+      )
+      record('条目按时段分组展示', hasGroup === true)
+      await waitFor(
+        `document.querySelectorAll('[data-testid="trip-item"]').length > 0`,
+        '行程条目渲染',
+        20000,
+      )
+      const itemCount = await evaluate(
+        `document.querySelectorAll('[data-testid="trip-item"]').length`,
+      )
+      record('行程条目渲染', itemCount > 0, `共 ${itemCount} 条`)
+
+      // 打卡：点第一个条目的打卡按钮，卡片应变为已打卡（data-checked="true"）且进度 +1
+      const checkinClicked = await evaluate(`(() => {
+        const btn = document.querySelector('[data-testid^="checkin-btn"]');
+        if (!btn) return false;
+        btn.click();
+        return true;
+      })()`)
+      record('点击「打卡」按钮', checkinClicked === true)
+      await waitFor(
+        `document.querySelectorAll('[data-testid="trip-item"][data-checked="true"]').length === 1`,
+        '条目变为已打卡状态',
+        20000,
+      )
+      record('打卡后条目标记为已打卡（置灰 + 对勾）', true)
+      const progressText = await evaluate(
+        `((document.querySelector('[data-testid="checkin-progress"]')||{}).innerText) || ''`,
+      )
+      record('打卡进度更新为 1', progressText.includes('1/'), progressText)
+
+      // 地图联动：详情页地图容器应渲染出标记
+      await waitFor(
+        `document.querySelectorAll('.amap-marker').length > 0`,
+        '详情页地图标记渲染',
+        40000,
+      )
+      const detailMarkers = await evaluate(`document.querySelectorAll('.amap-marker').length`)
+      record('详情页地图渲染出当天标记', detailMarkers > 0, `共 ${detailMarkers} 个标记`)
+
+      await sleep(2000)
+      await shot('p5-detail.png')
+
+      // 取消打卡：状态应回到未打卡，进度归零
+      const uncheckClicked = await evaluate(`(() => {
+        const btn = [...document.querySelectorAll('[data-testid^="checkin-btn"]')]
+          .find(b => window.__norm(b.textContent) === '取消打卡');
+        if (!btn) return false;
+        btn.click();
+        return true;
+      })()`)
+      record('点击「取消打卡」按钮', uncheckClicked === true)
+      await waitFor(
+        `document.querySelectorAll('[data-testid="trip-item"][data-checked="true"]').length === 0`,
+        '打卡状态被取消',
+        20000,
+      )
+      record('取消打卡后条目回到未打卡状态', true)
     } else {
       console.log('    （跳过完整生成：需要 SMOKE_GENERATE=1）')
     }
+
+    console.log('\n=== 7.5 行程详情页（再次打开） ===')
+    await goto(`${APP_BASE}/trips/${detailTripId}`)
+    await evaluate(HELPERS)
+    await waitFor(
+      `window.__has('每日安排') || window.__has('还没有排好的天')`,
+      '详情页渲染',
+      20000,
+    )
+    // 断言按模式分支：完整生成模式下行程已有内容，应能看到天数切换；
+    // 默认模式下是草稿，应显示空态提示而不是白屏
+    if (process.env.SMOKE_GENERATE === '1') {
+      const renderOk = await evaluate(`window.__has('第 1 天')`)
+      record('已生成行程再次打开详情页正常渲染', renderOk === true)
+    } else {
+      const emptyOk = await evaluate(
+        `window.__has('还没有排好的天') || window.__has('这一天还没排好')`,
+      )
+      record('草稿行程详情页显示空态提示', emptyOk === true)
+    }
+    const backOk = await evaluate(`window.__has('返回列表')`)
+    record('详情页提供返回列表入口', backOk === true)
+    await shot('p5-detail-empty.png')
 
     console.log('\n=== 8. 个人设置页：模型配置与密钥保护 ===')
     await goto(`${APP_BASE}/settings`)

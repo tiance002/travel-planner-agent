@@ -268,6 +268,64 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
 })
 
 // ---------------------------------------------------------------------------
+// 打卡
+// ---------------------------------------------------------------------------
+
+/**
+ * 打卡与取消打卡共用的一段前置校验：
+ * 按 TripItem → TripDay → Trip 的链路查条目，并把 userId 写进查询条件，
+ * 确保用户只能操作自己的行程条目。返回行程 id 与条目本身。
+ */
+async function loadOwnedItem(tripId: string, itemId: string, userId: string) {
+  return prisma.tripItem.findFirst({
+    where: {
+      id: itemId,
+      // Prisma 的关系过滤不能直接写 tripDay.userId，要穿过 TripDay 关联到 Trip 上判断归属
+      tripDay: { tripId, trip: { userId } },
+    },
+    select: { id: true, checkedAt: true },
+  })
+}
+
+// 到点打卡。重复打卡无害：第二次会覆盖时间，但正常入口不会触发（按钮已变为「取消打卡」）
+tripsRouter.post('/:tripId/items/:itemId/checkin', async (req, res, next) => {
+  try {
+    const item = await loadOwnedItem(req.params.tripId, req.params.itemId, req.user!.userId)
+    if (!item) {
+      res.status(404).json({ error: '行程条目不存在' })
+      return
+    }
+
+    await prisma.tripItem.update({
+      where: { id: item.id },
+      data: { checkedAt: new Date() },
+    })
+    res.json({ ok: true, checkedAt: new Date().toISOString() })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// 取消打卡。把 checkedAt 置回 null 即可，不删除条目
+tripsRouter.delete('/:tripId/items/:itemId/checkin', async (req, res, next) => {
+  try {
+    const item = await loadOwnedItem(req.params.tripId, req.params.itemId, req.user!.userId)
+    if (!item) {
+      res.status(404).json({ error: '行程条目不存在' })
+      return
+    }
+
+    await prisma.tripItem.update({
+      where: { id: item.id },
+      data: { checkedAt: null },
+    })
+    res.json({ ok: true })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // 删除
 // ---------------------------------------------------------------------------
 

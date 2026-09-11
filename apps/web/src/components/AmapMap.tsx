@@ -22,6 +22,8 @@ export interface MapMarker {
   label?: string
   /** 是否为选中态。选中态用实心高亮色，未选中用空心样式 */
   active?: boolean
+  /** 是否已打卡。已打卡用实心绿点 + 对勾角标 */
+  done?: boolean
   /** 形态：pin 是水滴形（用于住宿锚点），dot 是圆点（用于景点） */
   shape?: 'dot' | 'pin'
 }
@@ -75,6 +77,16 @@ function markerHtml(marker: MapMarker): string {
       `<div style="position:relative;width:26px;height:26px;transform:translate(-50%,-50%);">` +
       `<span style="position:absolute;inset:0;border-radius:50%;background:rgba(22,119,255,.25);animation:amap-pulse 1.6s ease-out infinite;"></span>` +
       `<span style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;background:#1677ff;border:2px solid #fff;box-shadow:0 0 0 1px #1677ff;"></span>` +
+      `</div>`
+    )
+  }
+
+  // 已打卡：实心绿点 + 右上角对勾角标，与列表卡片的置灰状态呼应
+  if (marker.done) {
+    return (
+      `<div style="position:relative;transform:translate(-50%,-50%);">` +
+      `<span style="display:block;width:12px;height:12px;border-radius:50%;background:#52c41a;border:2px solid #fff;box-shadow:0 0 0 1px #52c41a;"></span>` +
+      `<span style="position:absolute;left:8px;top:-8px;width:14px;height:14px;border-radius:50%;background:#52c41a;color:#fff;font-size:9px;line-height:14px;text-align:center;">✓</span>` +
       `</div>`
     )
   }
