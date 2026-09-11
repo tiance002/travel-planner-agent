@@ -14,7 +14,7 @@ export const tripsRouter = Router()
 // 整个行程模块都要求登录，统一挂上鉴权中间件
 tripsRouter.use(requireAuth)
 
-/** 把数据库里的 JSON 字符串字段安全地还原成数组 */
+/** 把数据库里的 JSON 字符串字段安全地还原成字符串数组 */
 function parseJsonArray(value: string): string[] {
   try {
     const parsed = JSON.parse(value)
@@ -22,6 +22,11 @@ function parseJsonArray(value: string): string[] {
   } catch {
     return []
   }
+}
+
+/** 还原行程条目里的照片列表 */
+function parsePhotos(value: string | null): string[] {
+  return value ? parseJsonArray(value) : []
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +145,10 @@ tripsRouter.get('/:id', async (req, res, next) => {
         tripDays: trip.tripDays.map((day) => ({
           ...day,
           weather: day.weather ? JSON.parse(day.weather) : null,
+          items: day.items.map((item) => ({
+            ...item,
+            photos: parsePhotos(item.photos),
+          })),
         })),
       },
     })

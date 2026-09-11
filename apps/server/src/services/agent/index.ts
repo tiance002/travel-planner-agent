@@ -531,6 +531,7 @@ async function persistDay(
           tag: item.tag || null,
           openTimeText: item.openTimeText || null,
           note: item.note || null,
+          photos: item.photos.length > 0 ? JSON.stringify(item.photos) : null,
         })),
       },
     },

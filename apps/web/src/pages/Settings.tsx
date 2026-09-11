@@ -1,12 +1,27 @@
-// 个人设置页：管理模型厂商与 API Key。
+// 个人设置页：账户设置（头像、用户名、密码）+ 模型接口配置。
 //
 // 安全原则：明文 Key 只在提交那一刻存在于浏览器内存里，
 // 保存后页面立即清空输入框，界面上只展示服务端返回的掩码。
+// 密码同理：新旧密码都只在提交瞬间存在，任何接口都不会回显。
 
-import { useEffect, useState, type ReactNode } from 'react'
-import { Alert, Button, Card, Descriptions, Input, Popconfirm, Select, Tag, Typography } from 'antd'
-import { getUsernameFromToken } from '../auth'
+import {
+  KeyOutlined,
+  UploadOutlined,
+  UserOutlined,
+} from '@ant-design/icons'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Alert, App, Avatar, Button, Card, Descriptions, Input, Popconfirm, Select, Space, Tag, Typography } from 'antd'
+import { setToken } from '../auth'
 import { extractError } from '../api/client'
+import {
+  fetchMe,
+  ME_UPDATED_EVENT,
+  setAvatar as saveAvatar,
+  updatePassword,
+  updateUsername,
+  uploadAvatar,
+  type MeInfo,
+} from '../api/account'
 import {
   clearModelConfig,
   fetchModelStatus,
@@ -15,6 +30,7 @@ import {
   type ModelStatus,
   type TestResult,
 } from '../api/settings'
+import UserAvatar from '../components/UserAvatar'
 
 // 常见厂商预设。选中后自动带出接口地址与候选模型名，
 // 用户也可以全部手填（选择「自定义」即可）。
@@ -42,29 +58,52 @@ const PROVIDERS = [
   },
 ]
 
+/** 系统预设头像：一群旅行主题的 emoji，选一个就是你的形象 */
+const PRESET_AVATARS = ['🌴', '🏝️', '⛰️', '🌊', '🍉', '🚲', '⛺', '🏮', '🐠', '🌸', '🍵', '📷']
+
 interface Notice {
   type: 'success' | 'error' | 'info'
   text: string
 }
 
 export default function Settings() {
-  const [status, setStatus] = useState<ModelStatus | null>(null)
-  const [loading, setLoading] = useState(true)
+  const { message } = App.useApp()
 
-  // 表单状态
+  // --- 账户设置状态 ---------------------------------------------------------
+  const [me, setMe] = useState<MeInfo | null>(null)
+  const [savingAvatar, setSavingAvatar] = useState(false)
+  const [username, setUsername] = useState('')
+  const [savingName, setSavingName] = useState(false)
+  const [oldPassword, setOldPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [savingPassword, setSavingPassword] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  // --- 模型接口状态 ---------------------------------------------------------
+  const [status, setStatus] = useState<ModelStatus | null>(null)
+  const [loadingModel, setLoadingModel] = useState(true)
   const [provider, setProvider] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [modelName, setModelName] = useState('')
   const [apiKey, setApiKey] = useState('')
-
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
 
-  // 首次进入时把已保存的配置读出来填充表单（Key 只有掩码）
+  // 首次进入：拉账户信息与已保存的模型配置（Key 只有掩码）
   useEffect(() => {
     let cancelled = false
+
+    fetchMe()
+      .then((info) => {
+        if (cancelled) return
+        setMe(info)
+        setUsername(info.username)
+      })
+      .catch(() => undefined)
+
     fetchModelStatus()
       .then((data) => {
         if (cancelled) return
@@ -77,12 +116,96 @@ export default function Settings() {
         if (!cancelled) setNotice({ type: 'error', text: extractError(error, '读取配置失败') })
       })
       .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) setLoadingModel(false)
       })
+
     return () => {
       cancelled = true
     }
   }, [])
+
+  /** me 变了就广播，让顶栏头像与用户名立刻刷新 */
+  function applyMe(next: MeInfo) {
+    setMe(next)
+    setUsername(next.username)
+    window.dispatchEvent(new Event(ME_UPDATED_EVENT))
+  }
+
+  // --- 头像 -------------------------------------------------------------------
+
+  async function choosePreset(emoji: string) {
+    setSavingAvatar(true)
+    try {
+      applyMe(await saveAvatar(`emoji:${emoji}`))
+      message.success('头像已更新')
+    } catch (error) {
+      message.error(extractError(error, '头像设置失败'))
+    } finally {
+      setSavingAvatar(false)
+    }
+  }
+
+  // 选完文件：压缩成 256×256 的方图再上传，避免几 MB 的原图直接塞给服务端
+  async function handleUploadFile(file: File) {
+    setSavingAvatar(true)
+    try {
+      const dataUrl = await compressImage(file, 256)
+      const { user } = await uploadAvatar(dataUrl)
+      applyMe(user)
+      message.success('头像已更新')
+    } catch (error) {
+      message.error(extractError(error, '头像上传失败'))
+    } finally {
+      setSavingAvatar(false)
+    }
+  }
+
+  // --- 用户名 -------------------------------------------------------------------
+
+  async function handleSaveUsername() {
+    if (username === me?.username) {
+      message.info('用户名没有变化')
+      return
+    }
+    setSavingName(true)
+    try {
+      const { token, user } = await updateUsername(username.trim())
+      setToken(token) // 改名后旧凭证里的用户名过期了，换上新的
+      applyMe(user)
+      message.success('用户名已更新')
+    } catch (error) {
+      message.error(extractError(error, '用户名修改失败'))
+    } finally {
+      setSavingName(false)
+    }
+  }
+
+  // --- 密码 -------------------------------------------------------------------
+
+  async function handleSavePassword() {
+    if (newPassword !== confirmPassword) {
+      message.error('两次输入的新密码不一致')
+      return
+    }
+    if (newPassword === oldPassword) {
+      message.warning('新密码不能与当前密码相同')
+      return
+    }
+    setSavingPassword(true)
+    try {
+      await updatePassword(oldPassword, newPassword)
+      setOldPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      message.success('密码已更新')
+    } catch (error) {
+      message.error(extractError(error, '密码修改失败'))
+    } finally {
+      setSavingPassword(false)
+    }
+  }
+
+  // --- 模型接口 ---------------------------------------------------------------
 
   const activeProvider = PROVIDERS.find((item) => item.key === provider)
 
@@ -160,17 +283,137 @@ export default function Settings() {
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
       <Typography.Title level={4}>个人设置</Typography.Title>
 
-      <Card style={{ marginBottom: 16 }}>
-        <Descriptions column={1} size="small">
-          <Descriptions.Item label="当前账号">
-            {getUsernameFromToken() ?? '未登录'}
-          </Descriptions.Item>
+      {/* ---------------- 账户设置 ---------------- */}
+      <Card
+        title={
+          <Space size={8}>
+            <UserOutlined />
+            账户设置
+          </Space>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Descriptions column={1} size="small" style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="当前账号">{me?.username ?? '加载中…'}</Descriptions.Item>
         </Descriptions>
+
+        {/* 头像：预设 emoji + 自定义上传 */}
+        <Field label="头像" hint="选一个系统形象，或上传自己的图片（会自动裁成方形并压缩）">
+          <Space size={20} wrap align="start">
+            <div style={{ textAlign: 'center' }}>
+              <UserAvatar avatar={me?.avatar} username={me?.username} size={72} style={{ display: 'block', margin: '0 auto 8px' }} />
+              <Button
+                size="small"
+                icon={<UploadOutlined />}
+                loading={savingAvatar}
+                data-testid="avatar-upload-btn"
+                onClick={() => fileRef.current?.click()}
+              >
+                自定义上传
+              </Button>
+              {/* 隐藏的原生文件输入：样式交给上面的按钮 */}
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: 'none' }}
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  if (file) void handleUploadFile(file)
+                  event.target.value = '' // 允许连续选同一张文件也能触发
+                }}
+              />
+            </div>
+
+            <div style={{ maxWidth: 340 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 44px)', gap: 8 }}>
+                {PRESET_AVATARS.map((emoji) => {
+                  const active = me?.avatar === `emoji:${emoji}`
+                  return (
+                    <Button
+                      key={emoji}
+                      data-testid={`avatar-option-${emoji}`}
+                      style={{ fontSize: 22, height: 44, padding: 0 }}
+                      variant={active ? 'solid' : 'outlined'}
+                      color={active ? 'primary' : 'default'}
+                      loading={savingAvatar && active}
+                      onClick={() => void choosePreset(emoji)}
+                    >
+                      {emoji}
+                    </Button>
+                  )
+                })}
+              </div>
+            </div>
+          </Space>
+        </Field>
+
+        {/* 用户名 */}
+        <Field label="用户名" hint="3-32 位字母、数字或下划线。修改后当前登录凭证会自动换新，无需重新登录">
+          <Space.Compact style={{ width: 320 }}>
+            <Input
+              data-testid="username-input"
+              value={username}
+              maxLength={32}
+              onChange={(event) => setUsername(event.target.value)}
+            />
+            <Button
+              type="primary"
+              data-testid="save-username-btn"
+              loading={savingName}
+              onClick={() => void handleSaveUsername()}
+            >
+              保存
+            </Button>
+          </Space.Compact>
+        </Field>
+
+        {/* 密码 */}
+        <Field label="修改密码" hint="至少 8 位。修改成功后需要用新密码重新登录（当前会话仍有效）">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 320 }}>
+            <Input.Password
+              data-testid="old-password"
+              placeholder="当前密码"
+              autoComplete="current-password"
+              value={oldPassword}
+              onChange={(event) => setOldPassword(event.target.value)}
+            />
+            <Input.Password
+              data-testid="new-password"
+              placeholder="新密码（至少 8 位）"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+            <Input.Password
+              data-testid="confirm-password"
+              placeholder="再输一遍新密码"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+            />
+            <Button
+              type="primary"
+              data-testid="save-password-btn"
+              loading={savingPassword}
+              disabled={!oldPassword || !newPassword || !confirmPassword}
+              onClick={() => void handleSavePassword()}
+            >
+              更新密码
+            </Button>
+          </div>
+        </Field>
       </Card>
 
+      {/* ---------------- 模型接口 ---------------- */}
       <Card
-        title="模型配置"
-        loading={loading}
+        title={
+          <Space size={8}>
+            <KeyOutlined />
+            模型接口
+          </Space>
+        }
+        loading={loadingModel}
         style={{ marginBottom: 16 }}
         extra={
           status?.hasApiKey ? (
@@ -306,6 +549,48 @@ export default function Settings() {
   )
 }
 
+/**
+ * 把用户选的图片压缩成 size×size 的方图，返回 dataURL 文本。
+ * 为什么要在前端压：手机随手拍一张就几 MB，直接传既慢又浪费服务器磁盘；
+ * 头像本来就只需要一个小方图。Canvas 是浏览器自带的画布，可以缩放绘制图片。
+ */
+function compressImage(file: File, size: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const img = new Image()
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        canvas.width = size
+        canvas.height = size
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('浏览器不支持图片处理'))
+          return
+        }
+        // 居中裁剪：取图片中间最大的正方形区域，缩放绘制到画布上
+        const side = Math.min(img.width, img.height)
+        ctx.drawImage(
+          img,
+          (img.width - side) / 2,
+          (img.height - side) / 2,
+          side,
+          side,
+          0,
+          0,
+          size,
+          size,
+        )
+        resolve(canvas.toDataURL('image/jpeg', 0.85))
+      }
+      img.onerror = () => reject(new Error('图片读取失败'))
+      img.src = reader.result as string
+    }
+    reader.onerror = () => reject(new Error('文件读取失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
 // 表单行：标题 + 说明 + 控件，统一间距
 function Field({
   label,
@@ -317,11 +602,11 @@ function Field({
   children: ReactNode
 }) {
   return (
-    <div>
+    <div style={{ marginBottom: 20 }}>
       <div style={{ marginBottom: 6, fontWeight: 500 }}>{label}</div>
       {children}
       {hint && (
-        <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>{hint}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(128,128,128,0.85)' }}>{hint}</div>
       )}
     </div>
   )

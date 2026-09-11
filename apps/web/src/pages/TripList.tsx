@@ -2,6 +2,7 @@
 // P1 阶段只做列表展示，用来验证「登录后能拿到属于自己」的数据。
 
 import { App, Button, Card, Empty, Popconfirm, Skeleton, Space, Tag, Typography } from 'antd'
+import { CompassOutlined, PlusOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api, extractError } from '../api/client'
@@ -70,10 +71,13 @@ export default function TripList() {
         style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}
         align="center"
       >
-        <Typography.Title level={4} style={{ margin: 0 }}>
-          我的行程
-        </Typography.Title>
-        <Button type="primary" onClick={() => navigate('/trips/new')}>
+        <Space size={8}>
+          <CompassOutlined style={{ color: '#3a9d7c' }} />
+          <Typography.Title level={4} style={{ margin: 0 }}>
+            我的行程
+          </Typography.Title>
+        </Space>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/trips/new')}>
           新建行程
         </Button>
       </Space>

@@ -23,6 +23,8 @@ export interface TripItemData {
   tag: string | null
   openTimeText: string | null
   note: string | null
+  /** 景点照片 URL 列表（高德 POI 返回，最多 3 张） */
+  photos: string[]
   /** 打卡时间。null 表示未打卡 */
   checkedAt: string | null
 }

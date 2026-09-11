@@ -3,6 +3,7 @@
 import cors from 'cors'
 import express from 'express'
 import type { NextFunction, Request, Response } from 'express'
+import path from 'node:path'
 import { config } from './config'
 import { amapRouter } from './routes/amap'
 import { authRouter } from './routes/auth'
@@ -17,6 +18,9 @@ app.use(cors())
 
 // 解析 JSON 请求体
 app.use(express.json())
+
+// 头像等用户上传文件的静态服务。URL 以 /uploads 开头，直接映射到磁盘目录
+app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')))
 
 // 健康检查，用来确认服务是否活着
 app.get('/api/health', (_req, res) => {

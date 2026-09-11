@@ -27,6 +27,7 @@ import {
   Tag,
   Typography,
 } from 'antd'
+import { BookOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -80,6 +81,63 @@ function groupBySlot(items: TripItemData[]) {
     }
   }
   return groups
+}
+
+/** 跳转小红书搜该地点的攻略。只做关键词跳转，不抓取任何内容——这是项目的合规红线 */
+function openXiaohongshu(placeName: string) {
+  const keyword = `${placeName} 旅游攻略`
+  window.open(
+    `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword)}`,
+    '_blank',
+    'noopener,noreferrer',
+  )
+}
+
+/** 景点照片：右侧 84px 方图。无图时给一个柔和渐变占位，保持卡片视觉整齐 */
+function ItemPhoto({ item }: { item: TripItemData }) {
+  const [failed, setFailed] = useState(false)
+  const photo = item.photos?.[0]
+
+  if (!photo || failed) {
+    return (
+      <div
+        aria-hidden
+        style={{
+          width: 84,
+          height: 84,
+          flexShrink: 0,
+          borderRadius: 10,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: 30,
+          background:
+            item.itemType === 'restaurant'
+              ? 'linear-gradient(135deg, #ffe9d6, #ffd8c2)'
+              : 'linear-gradient(135deg, #ddf3ea, #c8e8dc)',
+        }}
+      >
+        {item.itemType === 'restaurant' ? '🍜' : '🏞️'}
+      </div>
+    )
+  }
+
+  return (
+    <img
+      src={photo}
+      alt={item.name}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      style={{
+        width: 84,
+        height: 84,
+        flexShrink: 0,
+        objectFit: 'cover',
+        borderRadius: 10,
+        boxShadow: '0 2px 8px rgba(0,0,0,.10)',
+      }}
+    />
+  )
 }
 
 export default function TripDetail() {
@@ -500,8 +558,10 @@ export default function TripDetail() {
               {dayItems.length === 0 ? (
                 <Empty description="这一天还没排好" />
               ) : (
-                groups.map((group) => (
-                  <div key={group.slot} style={{ marginBottom: 8 }}>
+                groups.map((group, groupIndex) => (
+                  // key 不能只用 slot：一天里可能出现两段不连续的同名时段
+                  // （例如中午一顿饭、晚上夜市又是一段 noon），会撞 React key
+                  <div key={`${group.slot}-${groupIndex}`} style={{ marginBottom: 8 }}>
                     <Typography.Text type="secondary" strong style={{ fontSize: 12 }}>
                       {SLOT_LABEL[group.slot] ?? group.slot}
                     </Typography.Text>
@@ -577,23 +637,32 @@ export default function TripDetail() {
                             {item.cost && <Tag>人均 ¥{item.cost}</Tag>}
                           </Space>
 
-                          <div style={{ marginTop: 4 }}>
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                              {[
-                                item.openTimeText || (item.itemType === 'restaurant' ? '营业时间未知' : null),
-                                item.address,
-                                item.tag,
-                              ]
-                                .filter(Boolean)
-                                .join(' · ')}
-                            </Typography.Text>
-                          </div>
+                          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                            {/* 左侧信息区 */}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ marginTop: 4 }}>
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                  {[
+                                    item.openTimeText || (item.itemType === 'restaurant' ? '营业时间未知' : null),
+                                    item.address,
+                                    item.tag,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                </Typography.Text>
+                              </div>
 
-                          {item.note && (
-                            <div style={{ marginTop: 4 }}>
-                              <Typography.Text style={{ fontSize: 12 }}>{item.note}</Typography.Text>
+                              {item.note && (
+                                <div style={{ marginTop: 4 }}>
+                                  <Typography.Text style={{ fontSize: 12 }}>{item.note}</Typography.Text>
+                                </div>
+                              )}
                             </div>
-                          )}
+
+                            {/* 右侧照片：有图用高德返回的真实图片，无图用柔和渐变占位。
+                                加载失败时隐藏，不留破图图标 */}
+                            <ItemPhoto item={item} />
+                          </div>
 
                           <div
                             style={{ marginTop: 8 }}
@@ -616,6 +685,17 @@ export default function TripDetail() {
                                   打卡于 {dayjs(item.checkedAt).format('HH:mm')}
                                 </Typography.Text>
                               )}
+                              {/* 小红书攻略：只做关键词跳转搜索页，不抓取任何内容。
+                                  点击在浏览器新标签打开该地点的攻略搜索结果 */}
+                              <Button
+                                size="small"
+                                data-testid={`xhs-btn-${item.id}`}
+                                icon={<BookOutlined />}
+                                style={{ color: '#ff2442', borderColor: 'rgba(255,36,66,.45)' }}
+                                onClick={() => openXiaohongshu(item.name)}
+                              >
+                                小红书攻略
+                              </Button>
                             </Space>
                           </div>
 

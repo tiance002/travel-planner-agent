@@ -552,10 +552,47 @@ async function main() {
     record('详情页提供返回列表入口', backOk === true)
     await shot('p5-detail-empty.png')
 
-    console.log('\n=== 8. 个人设置页：模型配置与密钥保护 ===')
+    console.log('\n=== 8. 个人设置页：账户设置、外观切换与模型接口 ===')
     await goto(`${APP_BASE}/settings`)
     await evaluate(HELPERS)
-    await waitFor(`window.__has('模型配置')`, '设置页表单渲染', 20000)
+    await waitFor(`window.__has('模型接口')`, '设置页表单渲染', 20000)
+
+    // 账户设置：头像预设、用户名、密码三件套都要在页面上
+    const accountOk = await evaluate(
+      `window.__has('账户设置') && window.__has('头像') && window.__has('修改密码')`,
+    )
+    record('设置页渲染出账户设置（头像 / 用户名 / 修改密码）', accountOk === true)
+
+    // 头像预设网格：12 个 emoji 选项应全部渲染
+    const avatarCount = await evaluate(
+      `document.querySelectorAll('[data-testid^="avatar-option-"]').length`,
+    )
+    record('系统预设头像网格渲染', avatarCount === 12, `共 ${avatarCount} 个`)
+    await shot('p6-settings-account.png')
+
+    // 外观切换：点「黑夜」后 html 的 data-theme 应变为 night（背景氛围随之切换）
+    const themeClicked = await evaluate(`(() => {
+      const options = [...document.querySelectorAll('[data-testid="theme-toggle"] label')];
+      const target = options.find(o => window.__norm(o.textContent) === '黑夜');
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`)
+    await sleep(800)
+    const themeIsNight = await evaluate(`document.documentElement.dataset.theme === 'night'`)
+    record('切换到黑夜主题（星夜氛围生效）', themeClicked === true && themeIsNight === true)
+
+    // 切回白天，保持后续截图风格一致
+    await evaluate(`(() => {
+      const options = [...document.querySelectorAll('[data-testid="theme-toggle"] label')];
+      const target = options.find(o => window.__norm(o.textContent) === '白天');
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`)
+    await sleep(800)
+    const themeBackDay = await evaluate(`document.documentElement.dataset.theme === 'day'`)
+    record('切回白天主题', themeBackDay === true)
 
     const defaultBaseUrl = await evaluate(
       `(document.querySelector('input[data-testid="model-base-url"]') || {}).value || ''`,

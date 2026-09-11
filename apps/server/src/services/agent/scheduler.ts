@@ -39,6 +39,8 @@ export interface PlannedItem {
   orderIndex: number
   /** 与前一个地点之间的真实通勤分钟数。0 表示当天第一个地点（从住宿出发） */
   commuteMinutes: number | null
+  /** 景点照片 URL 列表（来自高德 POI 的 photos，最多 3 张），详情页展示用 */
+  photos: string[]
 }
 
 export interface PlannedDay {
@@ -537,6 +539,8 @@ function toPlannedItem(
     note,
     orderIndex,
     commuteMinutes: null,
+    // 照片最多存 3 张：详情页首屏够用，也避免 JSON 字段无限膨胀
+    photos: poi.photos.slice(0, 3),
   }
 }
 
@@ -847,7 +851,7 @@ function asPoi(item: PlannedItem): Poi {
     openTimeToday: item.openTimeText,
     openTimeWeek: '',
     tel: item.tel,
-    photos: [],
+    photos: item.photos,
     distance: null,
   }
 }

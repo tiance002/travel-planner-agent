@@ -48,10 +48,11 @@ import {
 import { api, extractError } from '../api/client'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
 
-/** 旅游偏好选项。定成枚举而不是自由文本，AI 的选点倾向才可控 */
-const PREFERENCE_OPTIONS = ['美食', '自然风光', '历史人文', '亲子', '摄影', '户外徒步', '购物', '夜生活']
+/** 旅游偏好选项。定成枚举而不是自由文本，AI 的选点倾向才可控。
+ *  下拉框用 tags 模式：既可以从这里选，也可以输入列表里没有的自定义偏好 */
+const PREFERENCE_OPTIONS = ['美食', '自然风光', '历史人文', '亲子', '摄影', '户外徒步', '购物', '夜生活', '地标打卡', '夜市小吃']
 
-/** 额外需求选项 */
+/** 额外需求选项。同样支持自定义输入 */
 const EXTRA_NEED_OPTIONS = ['带老人', '带小孩', '无障碍', '素食', '宠物友好', '避开人流', '自驾']
 
 /** antd 的下拉框要求选项是 { label, value } 结构，这里统一转换一次 */
@@ -461,9 +462,13 @@ export default function NewTrip() {
             <Form.Item
               name="preferences"
               label="旅游偏好"
-              extra="可多选，直接决定 AI 选点的倾向"
+              extra="可多选，也可以直接输入列表之外的偏好（回车确认）"
             >
-              <Select options={toSelectOptions(PREFERENCE_OPTIONS)} mode="multiple" placeholder="选择偏好，可不选" />
+              <Select
+                options={toSelectOptions(PREFERENCE_OPTIONS)}
+                mode="tags"
+                placeholder="选择或输入偏好，可不选"
+              />
             </Form.Item>
 
             <Row gutter={16}>
@@ -489,9 +494,13 @@ export default function NewTrip() {
             <Form.Item
               name="extraNeeds"
               label="额外需求（可选）"
-              extra="会作为硬约束交给 AI，例如「带老人」会减少步行强度"
+              extra="会作为硬约束交给 AI，例如「带老人」会减少步行强度；同样支持自行输入"
             >
-              <Select options={toSelectOptions(EXTRA_NEED_OPTIONS)} mode="multiple" placeholder="选择额外需求，可不选" />
+              <Select
+                options={toSelectOptions(EXTRA_NEED_OPTIONS)}
+                mode="tags"
+                placeholder="选择或输入额外需求，可不选"
+              />
             </Form.Item>
           </Form>
 
