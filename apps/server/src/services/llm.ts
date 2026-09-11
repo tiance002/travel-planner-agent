@@ -118,7 +118,8 @@ export async function testCredentials(credentials: ModelCredentials): Promise<Te
 
 // 把 HTTP 状态码翻译成用户能看懂的话。
 // 直接甩「HTTP 401」给用户，他是不知道该改哪里的。
-function describeHttpError(status: number, body: string, baseUrl: string): string {
+// 导出给 agent 模块复用，保证两处报错口径一致。
+export function describeHttpError(status: number, body: string, baseUrl: string): string {
   // 尽量把厂商返回的原始错误信息也带上，便于排查
   let detail = ''
   try {

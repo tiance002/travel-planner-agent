@@ -210,6 +210,19 @@ async function main() {
         await sleep(100)
       }
       await sleep(800)
+
+      // 页面根本没打开时给出明确提示。
+      // 最常见的两个原因：前端服务没启动；或者 Vite 只监听了 IPv6 的 localhost，
+      // 而 APP_BASE 写的是 127.0.0.1（Windows 上这两者不一定互通）。
+      // 不加这段检查的话，后面会以「localStorage 访问被拒绝」这种莫名其妙的错误报出来。
+      const current = await evaluate('location.href').catch(() => '')
+      if (!String(current).startsWith('http')) {
+        throw new Error(
+          `页面未能打开：${url}（当前停在 ${current || '空页面'}）。` +
+            `请确认前端服务已启动，并让 APP_BASE 与它监听的地址一致` +
+            `（Vite 默认监听 localhost，可用 APP_BASE=http://localhost:5173 覆盖）`,
+        )
+      }
     }
 
     async function shot(name) {
@@ -329,8 +342,13 @@ async function main() {
     const saved = await evaluate(`window.__clickButton('保存并继续')`)
     record('点击「保存并继续」', saved === true)
 
-    await waitFor(`window.__has('行程已保存为草稿')`, '草稿保存成功提示', 40000)
-    record('行程草稿保存成功', true)
+    // 保存成功后进入第三步「生成行程」，标志是生成按钮出现
+    await waitFor(
+      `document.querySelector('[data-testid="generate-btn"]') !== null`,
+      '草稿保存成功并进入生成步骤',
+      40000,
+    )
+    record('行程草稿保存成功并进入生成步骤', true)
 
     const tripId = await evaluate(
       `(document.body.innerText.match(/行程编号\\s*([0-9a-f-]{36})/) || [])[1] || ''`,
@@ -377,7 +395,67 @@ async function main() {
     )
     record('地图上渲染出标记点', markerCount > 0, `共 ${markerCount} 个标记节点`)
 
-    console.log('\n=== 7. 个人设置页：模型配置与密钥保护 ===')
+    console.log('\n=== 7. AI 生成行程 ===')
+    // 这一步刻意放在「个人设置」之前：设置页那一段会用假 Key 覆盖配置并在结尾清除，
+    // 而完整生成需要真实可用的模型凭据（本机调试时用 scripts/_copy-credential.ts 临时借一份）。
+    await goto(`${APP_BASE}/trips/new`)
+    await evaluate(HELPERS)
+    await evaluate(`window.__setInput('input[placeholder="如：杭州"]', '杭州')`)
+    await evaluate(`window.__clickButton('解析')`)
+    await waitFor(`window.__has('已解析')`, '城市解析', 30000)
+    await evaluate(`window.__clickButton('下一步：选定住宿')`)
+    await waitFor(`document.querySelectorAll('[data-testid="hotel-item"]').length > 0`, '酒店结果', 40000)
+    await evaluate(`window.__clickFirstListItem()`)
+    await sleep(1000)
+    await evaluate(`window.__clickButton('保存并继续')`)
+
+    await waitFor(
+      `document.querySelector('[data-testid="generate-btn"]') !== null`,
+      '生成按钮出现',
+      40000,
+    )
+    record('第三步出现「开始生成行程」按钮', true)
+
+    const generateClicked = await evaluate(`window.__clickButton('开始生成行程')`)
+    record('点击「开始生成行程」', generateClicked === true)
+
+    // 点击后必须二选一地给出明确反馈：
+    //   已配置 Key → 出现进度提示；未配置 Key → 出现可读的失败原因。
+    // 真正要防的是「点了没反应」，那才是 bug。
+    const reacted = await waitFor(
+      `document.querySelector('[data-testid="gen-progress"]') !== null || document.querySelector('[data-testid="gen-error"]') !== null`,
+      '生成状态反馈',
+      40000,
+    )
+    record('点击后有明确状态反馈（进度或可读错误）', reacted === true)
+
+    const errorText = await evaluate(
+      `(document.querySelector('[data-testid="gen-error"]') || {}).innerText || ''`,
+    )
+    if (errorText) {
+      console.log(`    当前账号未配置模型 Key，页面给出的提示：${errorText.split('\\n').pop()}`)
+    }
+    await shot('p4-generate-entry.png')
+
+    // 完整生成会真实消耗模型 token 与高德配额，默认不跑。
+    // 需要端到端验证时：SMOKE_GENERATE=1 npm run smoke
+    if (process.env.SMOKE_GENERATE === '1') {
+      console.log('    等待 AI 排程完成（真实调用模型与高德接口）……')
+      await waitFor(
+        `(((document.querySelector('[data-testid="gen-status"]') || {}).innerText) || '').includes('已生成')`,
+        '行程生成完成',
+        300000,
+      )
+      record('行程生成完成，状态变为「已生成」', true)
+
+      const bannerOk = await evaluate(`window.__has('行程已生成完成')`)
+      record('页面显示生成成功提示', bannerOk === true)
+      await shot('p4-generated.png')
+    } else {
+      console.log('    （跳过完整生成：需要 SMOKE_GENERATE=1）')
+    }
+
+    console.log('\n=== 8. 个人设置页：模型配置与密钥保护 ===')
     await goto(`${APP_BASE}/settings`)
     await evaluate(HELPERS)
     await waitFor(`window.__has('模型配置')`, '设置页表单渲染', 20000)
@@ -402,12 +480,14 @@ async function main() {
     const savedModel = await evaluate(`window.__clickButton('保存配置')`)
     record('点击「保存配置」', savedModel === true)
 
-    await waitFor(
-      `(document.querySelector('[data-testid="key-badge"]')||{}).textContent === '已配置'`,
-      '保存后状态变为已配置',
-      20000,
+    // 用「配置已保存」这条提示作为等待条件，而不是状态标签。
+    // 原因：账号本来就配过 Key 时，标签在保存前就是「已配置」，
+    // 等待会立刻通过，断言就跑到保存请求返回之前去了，产生假失败。
+    await waitFor(`window.__has('配置已保存')`, '保存成功提示', 25000)
+    const badgeText = await evaluate(
+      `((document.querySelector('[data-testid="key-badge"]')||{}).textContent) || ''`,
     )
-    record('保存后标记为「已配置」', true)
+    record('保存后标记为「已配置」', badgeText === '已配置', badgeText)
 
     const maskedShown = await evaluate(`window.__has('••••')`)
     record('页面展示 Key 掩码', maskedShown === true)
@@ -450,7 +530,7 @@ async function main() {
     )
     record('清除后标记为「未配置」', true)
 
-    console.log('\n=== 8. 页面运行时报错检查 ===')
+    console.log('\n=== 9. 页面运行时报错检查 ===')
     // 区分「组件弃用提示」与「真正的运行时报错」：
     // 弃用提示不影响功能，但需要单独列出来推动升级；真正的报错才算失败。
     const allIssues = pageErrors.filter(

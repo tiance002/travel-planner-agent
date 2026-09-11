@@ -7,6 +7,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { generateTrip } from '../services/agent'
 
 export const tripsRouter = Router()
 
@@ -191,6 +192,58 @@ tripsRouter.patch('/:id/stay', async (req, res, next) => {
     })
 
     res.json({ trip })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// AI 生成行程
+// ---------------------------------------------------------------------------
+
+// 判定「卡住的生成任务」的时间。超过这个时长的 generating 记录视为上次进程重启遗留，
+// 允许重新触发，避免用户永远等一个不会完成的进度。
+const STALE_GENERATING_MS = 10 * 60 * 1000
+
+// 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
+tripsRouter.post('/:id/generate', async (req, res, next) => {
+  try {
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+      select: { id: true, status: true, updatedAt: true },
+    })
+    if (!trip) {
+      res.status(404).json({ error: '行程不存在' })
+      return
+    }
+
+    if (
+      trip.status === 'generating' &&
+      Date.now() - trip.updatedAt.getTime() < STALE_GENERATING_MS
+    ) {
+      res.status(409).json({ error: '这个行程正在生成中，请稍候' })
+      return
+    }
+
+    await prisma.trip.update({
+      where: { id: trip.id },
+      data: { status: 'generating', genProgress: '正在准备', genError: null },
+    })
+
+    // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
+    // 失败时把原因写进 genError，前端就能直接展示给用户看。
+    void generateTrip(trip.id).catch(async (error: unknown) => {
+      const message = error instanceof Error ? error.message : '生成失败'
+      console.error(`[生成 ${trip.id}] 失败：${message}`)
+      await prisma.trip
+        .update({
+          where: { id: trip.id },
+          data: { status: 'failed', genProgress: null, genError: message },
+        })
+        .catch(() => undefined)
+    })
+
+    res.status(202).json({ ok: true, status: 'generating' })
   } catch (err) {
     next(err)
   }

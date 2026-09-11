@@ -4,7 +4,7 @@
 //   1. 基本信息：目的地（需解析成行政区划编码）、出发日期、天数、人数、偏好、预算、额外需求
 //   2. 选定住宿：在页面内嵌的高德地图上搜索并点选酒店，作为每日行程的锚点；
 //      也可以选「还没定」，此时交给 AI 推荐交通便利的中心区域
-//   3. 生成行程：AI 排布每日景点与餐厅（下一阶段开放，本页先完成草稿落库）
+//   3. 生成行程：触发 AI 排布每日景点与餐厅，页面轮询显示进度
 //   4. 查看结果：时间轴与地图联动、到点打卡（下一阶段开放）
 //
 // 为什么一定要先解析目的地：高德做 POI 检索和天气查询用的都是 6 位行政区划编码（adcode），
@@ -32,7 +32,7 @@ import {
   Typography,
 } from 'antd'
 import dayjs, { type Dayjs } from 'dayjs'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   POI_TYPE,
@@ -109,6 +109,13 @@ export default function NewTrip() {
   const [saving, setSaving] = useState(false)
   const [savedTripId, setSavedTripId] = useState<string | null>(null)
   const [weather, setWeather] = useState<WeatherResult | null>(null)
+
+  // 生成相关状态。真正的排程在服务端后台跑，这里只负责轮询与展示
+  const [generating, setGenerating] = useState(false)
+  const [genStatus, setGenStatus] = useState<'draft' | 'generating' | 'ready' | 'failed'>('draft')
+  const [genProgress, setGenProgress] = useState('')
+  const [genError, setGenError] = useState('')
+  const pollTimer = useRef<number | null>(null)
 
   // 用户改了城市名，之前解析的结果就作废了，必须重新解析
   function handleValuesChange(changed: Partial<StepOneForm>) {
@@ -241,6 +248,62 @@ export default function NewTrip() {
     }
   }
 
+  // --- 第三步：触发 AI 生成并轮询进度 ---------------------------------------
+
+  /**
+   * 轮询生成状态。
+   *
+   * 为什么不用「一次请求等到生成完」：模型要跑十几轮工具调用，短则二十秒、
+   * 长则一两分钟。让一个请求挂那么久，中间任何一环超时都会让用户白等。
+   * 改成「服务端在后台跑 + 前端每隔几秒问一次」，体验和稳定性都更好。
+   */
+  async function pollGeneration(tripId: string) {
+    try {
+      const { data } = await api.get<{
+        trip: { status: string; genProgress: string | null; genError: string | null }
+      }>(`/trips/${tripId}`)
+
+      const trip = data.trip
+      setGenStatus(trip.status as 'draft' | 'generating' | 'ready' | 'failed')
+      setGenProgress(trip.genProgress ?? '')
+      setGenError(trip.genError ?? '')
+
+      if (trip.status === 'generating') {
+        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
+      } else {
+        setGenerating(false)
+      }
+    } catch (err) {
+      setGenError(extractError(err, '读取生成状态失败，请刷新页面查看'))
+      setGenerating(false)
+    }
+  }
+
+  async function startGenerate() {
+    if (!savedTripId) return
+
+    setGenerating(true)
+    setGenError('')
+    setGenProgress('正在准备')
+    setGenStatus('generating')
+
+    try {
+      await api.post(`/trips/${savedTripId}/generate`)
+      void pollGeneration(savedTripId)
+    } catch (err) {
+      setGenError(extractError(err, '触发失败，请稍后重试'))
+      setGenerating(false)
+      setGenStatus('failed')
+    }
+  }
+
+  // 离开页面时清掉定时器，避免在后台空转
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current !== null) window.clearTimeout(pollTimer.current)
+    }
+  }, [])
+
   // --- 地图标记 -------------------------------------------------------------
   // 用 useMemo 固定引用：否则每次渲染都会生成新数组，导致地图反复重绘标记
   const stayMarkers = useMemo<MapMarker[]>(() => {
@@ -285,7 +348,7 @@ export default function NewTrip() {
           items={[
             { title: '基本信息', content: '目的地、日期、偏好与预算' },
             { title: '选定住宿', content: '内嵌地图选点，或交给 AI 推荐中心区域' },
-            { title: '生成行程', content: 'AI 排布每日景点与餐厅（下一阶段开放）' },
+            { title: '生成行程', content: 'AI 依据高德真实数据排布每日景点与餐厅' },
             { title: '查看结果', content: '时间轴与地图联动、到点打卡（下一阶段开放）' },
           ]}
         />
@@ -561,27 +624,96 @@ export default function NewTrip() {
 
       {/* ---------------- 第三步：生成行程（待开放） ---------------- */}
       {current === 2 && stepOne && (
-        <Card title="行程已保存为草稿">
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            title="AI 自动排布行程尚未开放"
-            description={
-              <span>
-                你填写的信息已经完整存入数据库，下一步就是让 AI 依据这些条件排布每日景点与餐厅。
-                该能力依赖模型接口，需要先在「个人设置」里选择模型厂商并填写你自己的 API Key。
-                <br />
-                届时会按你确认的规则执行：以住宿为圆心、直线距离筛选与聚类、每天不超过 3 个景点、
-                餐厅就近插在相邻景点之间、相邻两点实际通勤超过 40 分钟就换点。
-              </span>
-            }
-          />
+        <Card
+          title="生成行程"
+          extra={
+            <span data-testid="gen-status">
+              {genStatus === 'ready' ? (
+                <Tag color="green">已生成</Tag>
+              ) : genStatus === 'generating' ? (
+                <Tag color="processing">生成中</Tag>
+              ) : genStatus === 'failed' ? (
+                <Tag color="red">生成失败</Tag>
+              ) : (
+                <Tag>草稿</Tag>
+              )}
+            </span>
+          }
+        >
+          {genStatus === 'ready' ? (
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="行程已生成完成"
+              description="每日的景点、餐厅与通勤安排都已写入这条行程，可以到「我的行程」里查看。逐日时间轴与到点打卡将在下一阶段开放。"
+            />
+          ) : (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="点击下方按钮开始排程"
+              description={
+                <span>
+                  AI 会先通过高德查询你目的地的景点、餐厅与天气，再按这些规则排布：以住宿为锚点、
+                  每天游览类地点不超过 3 个、餐厅插在相邻两个景点之间、相邻两点实际通勤超过 40 分钟就换点、
+                  有雨时优先室内场所。
+                  <br />
+                  整个过程大约二十秒到一分钟。期间可以离开本页，生成会在服务端继续。
+                </span>
+              }
+            />
+          )}
+
+          <Space style={{ marginBottom: 16 }} wrap>
+            <Button
+              type="primary"
+              data-testid="generate-btn"
+              loading={generating}
+              onClick={startGenerate}
+            >
+              {genStatus === 'ready' ? '重新生成' : '开始生成行程'}
+            </Button>
+            {generating && (
+              <Typography.Text type="secondary">生成在服务端进行，请勿关闭当前账号的会话</Typography.Text>
+            )}
+          </Space>
+
+          {genStatus === 'generating' && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              data-testid="gen-progress"
+              title={`AI 正在排程：${genProgress || '准备中'}`}
+              description="正在反复调用高德接口查询景点、餐厅与真实路线，请稍候。"
+            />
+          )}
+
+          {genError && (
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginBottom: 16 }}
+              data-testid="gen-error"
+              title="生成失败"
+              description={genError}
+            />
+          )}
 
           <Descriptions column={2} size="small" bordered>
             <Descriptions.Item label="行程编号">{savedTripId ?? '-'}</Descriptions.Item>
             <Descriptions.Item label="状态">
-              <Tag>草稿</Tag>
+              {genStatus === 'ready' ? (
+                <Tag color="green">已生成</Tag>
+              ) : genStatus === 'generating' ? (
+                <Tag color="processing">生成中</Tag>
+              ) : genStatus === 'failed' ? (
+                <Tag color="red">生成失败</Tag>
+              ) : (
+                <Tag>草稿</Tag>
+              )}
             </Descriptions.Item>
             <Descriptions.Item label="目的地">
               {resolvedCity?.city}（{resolvedCity?.adcode}）

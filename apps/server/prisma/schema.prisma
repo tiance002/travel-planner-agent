@@ -97,6 +97,11 @@ model Trip {
   /// draft 草稿 / generating 生成中 / ready 完成 / failed 失败
   status String @default("draft")
 
+  /// 生成进度文案，生成过程中实时更新，前端轮询时展示给用户看
+  genProgress String?
+  /// 生成失败的原因。status 为 failed 时才有值
+  genError String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
