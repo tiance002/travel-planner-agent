@@ -31,6 +31,16 @@ export default function AppLayout() {
   // 顶栏展示的用户信息。改名与换头像在设置页完成后会广播事件，这里监听刷新
   const [me, setMe] = useState<MeInfo | null>(null)
 
+  /**
+   * 当前是不是「行程详情」页（/trips/:id）。
+   *
+   * 用途：这一页要用「右侧锁定 + 左侧独立滚动」的布局，
+   * 外层内容区必须让出滚动权，否则会出现双层滚动条、
+   * 或者右侧地图被外层滚动带出视野。
+   * 判定要排除 /trips（列表）与 /trips/new（新建向导），它们仍需整页滚动。
+   */
+  const isTripDetailPage = /^\/trips\/[^/]+$/.test(location.pathname) && location.pathname !== '/trips/new'
+
   useEffect(() => {
     let cancelled = false
     // 没有 token 时不必请求（正常流程 RequireAuth 已拦，这里做防御）
@@ -117,8 +127,16 @@ export default function AppLayout() {
           </Space>
         </Header>
 
-        {/* 只有这里滚动：左侧栏与顶栏固定 */}
-        <Content style={{ overflowY: 'auto', padding: '20px 24px 32px' }}>
+        {/* 只有这里滚动：左侧栏与顶栏固定。
+            行程详情页例外：那一页要「右侧地图钉住不动、只滚左侧每日安排」，
+            所以外层不滚，交给页面内部自己管。判断方式是最小改动且不依赖
+            全局状态——路径形如 /trips/xxx 且不是 /trips 或 /trips/new。 */}
+        <Content
+          style={{
+            overflowY: isTripDetailPage ? 'hidden' : 'auto',
+            padding: isTripDetailPage ? '20px 24px 16px' : '20px 24px 32px',
+          }}
+        >
           <Outlet />
         </Content>
       </Layout>

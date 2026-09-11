@@ -8,6 +8,9 @@ import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { generateTrip } from '../services/agent'
+import { findAlternatives } from '../services/agent/alternatives'
+import { parseDayTypeBan } from '../services/agent/spot-rules'
+import { searchPoiById, type Poi } from '../services/amap'
 
 export const tripsRouter = Router()
 
@@ -329,6 +332,176 @@ tripsRouter.delete('/:tripId/items/:itemId/checkin', async (req, res, next) => {
       data: { checkedAt: null },
     })
     res.json({ ok: true })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 换一个：查看替换候选、执行替换
+// ---------------------------------------------------------------------------
+
+/**
+ * 把某个 TripItem 连同它所在的一整天一起读出来，用于替换。
+ *
+ * 需要整天数据的原因：判断候选是否合适，必须知道目标点的前一个点和后一个点
+ * （换完之后不能把通勤搞超时），而这两个点只有拿到整天的序列才知道。
+ */
+async function loadItemWithDay(tripId: string, itemId: string, userId: string) {
+  const item = await prisma.tripItem.findFirst({
+    where: { id: itemId, tripDay: { tripId, trip: { userId } } },
+    include: {
+      tripDay: {
+        include: { items: { orderBy: { orderIndex: 'asc' } } },
+      },
+    },
+  })
+  return item
+}
+
+/** 把数据库里的条目还原成 POI 形状，供距离与路径计算使用 */
+function toPoiShape(item: {
+  poiId: string | null
+  name: string
+  lng: number | null
+  lat: number | null
+  address: string | null
+  tel: string | null
+  rating: string | null
+  cost: string | null
+  tag: string | null
+  typecode: string | null
+  openTimeText: string | null
+  photos: string | null
+}): Poi | null {
+  if (!item.poiId || item.lng === null || item.lat === null) return null
+  return {
+    poiId: item.poiId,
+    name: item.name,
+    lng: item.lng,
+    lat: item.lat,
+    address: item.address ?? '',
+    type: '',
+    typecode: item.typecode ?? '',
+    cityName: '',
+    district: '',
+    adcode: '',
+    rating: item.rating === null ? null : Number(item.rating),
+    cost: item.cost === null ? null : Number(item.cost),
+    tag: item.tag ?? '',
+    keytag: '',
+    openTimeToday: item.openTimeText ?? '',
+    openTimeWeek: '',
+    tel: item.tel ?? '',
+    photos: [],
+    distance: null,
+  }
+}
+
+// 查询某个条目的替换候选。返回的是列表而不是单个结果，由用户自己挑
+tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) => {
+  try {
+    const item = await loadItemWithDay(req.params.tripId, req.params.itemId, req.user!.userId)
+    if (!item) {
+      res.status(404).json({ error: '行程条目不存在' })
+      return
+    }
+
+    const target = toPoiShape(item)
+    if (!target) {
+      res.status(400).json({ error: '这个条目缺少坐标信息，无法替换' })
+      return
+    }
+
+    // 前一个点与后一个点。住宿锚点不算「上一个点」——它是起点，不是游玩地点，
+    // 但仍参与通勤判断：换完之后从住宿出发不能更绕
+    const ordered = item.tripDay.items
+    const position = ordered.findIndex((entry) => entry.id === item.id)
+    const prevItem = position > 0 ? ordered[position - 1] : null
+    const nextItem = position >= 0 && position < ordered.length - 1 ? ordered[position + 1] : null
+
+    // 整趟行程已用过的 poiId。跨天去重：不能把一个已经在别的天出现过的地点换进来
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.tripId, userId: req.user!.userId },
+      select: { extraNeeds: true },
+    })
+    const usedRows = await prisma.tripItem.findMany({
+      where: { tripDay: { tripId: req.params.tripId } },
+      select: { poiId: true },
+    })
+    const usedPoiIds = new Set(
+      usedRows.map((row) => row.poiId).filter((id): id is string => Boolean(id)),
+    )
+
+    const candidates = await findAlternatives({
+      target,
+      previous: prevItem ? toPoiShape(prevItem) : null,
+      next: nextItem ? toPoiShape(nextItem) : null,
+      slot: item.slot,
+      usedPoiIds,
+      ban: parseDayTypeBan(trip?.extraNeeds ? parseJsonArray(trip.extraNeeds) : []),
+    })
+
+    res.json({ candidates, currentPoiId: item.poiId })
+  } catch (err) {
+    next(err)
+  }
+})
+
+const replaceSchema = z.object({ poiId: z.string().min(1) })
+
+// 执行替换。只换这一个条目，不重排整天的顺序——
+// 用户的心智是「我只想换掉 A」，把 B 和 C 的顺序也一起改了会让人困惑
+tripsRouter.patch('/:tripId/items/:itemId/replace', async (req, res, next) => {
+  try {
+    const parsed = replaceSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: '参数不合法' })
+      return
+    }
+
+    const item = await loadItemWithDay(req.params.tripId, req.params.itemId, req.user!.userId)
+    if (!item) {
+      res.status(404).json({ error: '行程条目不存在' })
+      return
+    }
+
+    // 从高德重新取一次这个 POI。刻意不信任前端传来的名称与坐标——
+    // 坐标只能来自高德，这是整个项目的硬约定
+    const fresh = await searchPoiById(parsed.data.poiId)
+    if (!fresh) {
+      res.status(404).json({ error: '找不到这个地点，请重新查询候选' })
+      return
+    }
+
+    const updated = await prisma.tripItem.update({
+      where: { id: item.id },
+      data: {
+        poiId: fresh.poiId,
+        name: fresh.name,
+        lng: fresh.lng,
+        lat: fresh.lat,
+        address: fresh.address || null,
+        tel: fresh.tel || null,
+        rating: fresh.rating === null ? null : String(fresh.rating),
+        cost: fresh.cost === null ? null : String(fresh.cost),
+        tag: fresh.tag || fresh.keytag || null,
+        typecode: fresh.typecode || null,
+        openTimeText: fresh.openTimeToday || null,
+        // 照片一并换掉，否则会残留上一个地点的图
+        photos: fresh.photos.length > 0 ? JSON.stringify(fresh.photos.slice(0, 3)) : null,
+        // 打卡状态清零：换成了新地方，之前的打卡记录就不再有效
+        checkedAt: null,
+      },
+    })
+
+    res.json({
+      item: {
+        ...updated,
+        photos: parsePhotos(updated.photos),
+        checkedAt: updated.checkedAt ? updated.checkedAt.toISOString() : null,
+      },
+    })
   } catch (err) {
     next(err)
   }

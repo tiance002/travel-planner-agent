@@ -394,6 +394,25 @@ export async function searchPoiAround(options: PoiAroundOptions): Promise<Poi[]>
 }
 
 /**
+ * 按 poiId 查询单个 POI 的完整信息。
+ *
+ * 用于「换一个」：前端只传回 poiId，服务端拿它去高德换回权威的坐标、评分、
+ * 营业时间。刻意不接受前端传来的坐标——坐标只能来自高德，这是项目的硬约定。
+ * 缓存策略与照片一致：POI 基本信息一天内几乎不变。
+ */
+export async function searchPoiById(poiId: string): Promise<Poi | null> {
+  if (!poiId) return null
+  return cached(`poi-detail:${poiId}`, TTL.geocode, async () => {
+    const json = await call<AmapEnvelope & { pois?: RawPoi[] }>('/v5/place/detail', {
+      id: poiId,
+      show_fields: POI_SHOW_FIELDS,
+    })
+    const raw = json.pois?.[0]
+    return raw ? normalizePoi(raw) : null
+  })
+}
+
+/**
  * 按 poiId 拉取 POI 详情里的照片。
  *
  * 为什么需要这个接口：详情页照片在行程生成时从搜索结果里顺带保存，

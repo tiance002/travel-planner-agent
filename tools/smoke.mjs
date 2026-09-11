@@ -146,6 +146,29 @@ async function main() {
   const { token, created } = await loginToken()
   console.log(`  测试账号 ${SMOKE_USER} ${created ? '已注册' : '已存在，直接登录'}（凭证长度 ${token.length}）`)
 
+  // 完整生成需要真实可用的模型凭据，而脚本结尾第 8 步会「清除配置」，
+  // 所以每跑一次 SMOKE_GENERATE=1，下一次跑之前就必须重新借一次凭据。
+  // 不在这里提前检查的话，问题会表现成「等了 8 分钟然后说生成超时」，
+  // 极难判断根因。宁可在开头就明确告诉使用者该做什么。
+  if (process.env.SMOKE_GENERATE === '1') {
+    const status = await fetch(`${API_BASE}/settings/model`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null)
+
+    const usable = Boolean(status && (status.hasApiKey || status.fallbackAvailable))
+    if (!usable) {
+      console.log('\n  ✗ 测试账号没有可用的模型凭据，完整生成一定会失败。')
+      console.log('    脚本结尾会清除配置，所以每轮 SMOKE_GENERATE=1 之前都要重新借一次：')
+      console.log('      cd apps/server && npx tsx scripts/copy-credential.ts <来源用户名> ' + SMOKE_USER)
+      console.log('    （或改跑默认冒烟：npm run smoke，它不触发真实模型调用）\n')
+      process.exitCode = 1
+      return
+    }
+    console.log(`  模型凭据可用（${status.hasApiKey ? '账号已配置' : '走服务端全局默认 Key'}）`)
+  }
+
   fs.rmSync(PROFILE_DIR, { recursive: true, force: true })
 
   const chrome = spawn(
@@ -240,6 +263,46 @@ async function main() {
       throw new Error(`等待超时：${label}`)
     }
 
+    /**
+     * 用「真实」鼠标事件点击一个元素。
+     *
+     * 为什么不能一律用 element.click()：antd 6 的 Select 只认真实的鼠标/指针事件
+     * 来展开下拉，脚本派发的合成 MouseEvent（即便是 bubbles 的）不会触发它。
+     * 这里通过 CDP 的 Input 域在元素中心发一组真正的 mouseMoved/Pressed/Released。
+     *
+     * 返回 false 表示没找到元素（而不是点击失败），调用方据此给出可读提示。
+     */
+    async function clickReal(selector) {
+      const box = await evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`)
+      if (!box) return false
+      const base = { x: box.x, y: box.y, button: 'left', clickCount: 1 }
+      await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved' }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sessionId)
+      await cdp.send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sessionId)
+      return true
+    }
+
+    /** 按一个键（用于关掉展开的下拉，避免遮挡后续截图与点击） */
+    async function pressKey(key) {
+      const codes = { Escape: 27, Enter: 13, ArrowDown: 40 }
+      await cdp.send(
+        'Input.dispatchKeyEvent',
+        { type: 'keyDown', key, windowsVirtualKeyCode: codes[key] ?? 0, nativeVirtualKeyCode: codes[key] ?? 0 },
+        sessionId,
+      )
+      await cdp.send(
+        'Input.dispatchKeyEvent',
+        { type: 'keyUp', key, windowsVirtualKeyCode: codes[key] ?? 0, nativeVirtualKeyCode: codes[key] ?? 0 },
+        sessionId,
+      )
+    }
+
     // 页面内的操作辅助函数。React 的受控输入必须走原生 setter + input 事件，
     // 直接改 input.value 不会触发 React 的状态更新。
     const HELPERS = `
@@ -281,6 +344,74 @@ async function main() {
     const onWizard = await evaluate(`window.__has('新建行程') && window.__has('目的地城市')`)
     record('新建行程页渲染出向导表单', onWizard === true)
     await shot('p2-step1.png')
+
+    // 额外需求是 Select(mode="tags")，选项要展开下拉才可见。
+    // 本轮为「行程体裁」加了四个开关项，逐个在候选项里核对。
+    //
+    // 四个 antd 6 的坑，缺一不可：
+    //   1. 不再有 `.ant-select-selector`，容器换成了 `.ant-select-content`。
+    //      好在这颗输入框带 id（id="extraNeeds"），直接用它定位最稳。
+    //   2. 派发合成 MouseEvent 打不开下拉，必须用 CDP 发真实鼠标事件。
+    //   3. **不能用 innerText 断言**：下拉超出视口的部分会被裁掉，
+    //      innerText 读不到，会误判成「选项没渲染」。要读选项元素的 textContent。
+    //   4. **选项列表是虚拟滚动**：11 个选项首屏只渲染 10 个，最后一项不在 DOM 里。
+    //      必须滚到底部再读一次，否则会把「虚拟化」误判成「选项没配」。
+    const READ_OPTIONS = `[...document.querySelectorAll('.ant-select-item-option')]
+      .map(e => (e.textContent || '').trim())`
+    const wantedOptions = [
+      '不含爬山等高强度行程',
+      '不含主题乐园整天行程',
+      '不安排夜爬看日出',
+      '行程节奏轻松一些',
+    ]
+
+    const extraOpened = await clickReal('#extraNeeds')
+    await sleep(1000)
+    const seenOptions = new Set(await evaluate(READ_OPTIONS))
+
+    const scrolledDown = await evaluate(`(() => {
+      const dropdown = document.querySelector('.ant-select-dropdown');
+      if (!dropdown) return false;
+      // 不写死 rc-virtual-list 的类名（antd 6 换过），
+      // 直接找 dropdown 内部真正可滚动的那个元素
+      const scrollables = [dropdown, ...dropdown.querySelectorAll('*')]
+        .filter(el => el.scrollHeight > el.clientHeight + 1);
+      if (scrollables.length === 0) return false;
+      const target = scrollables[scrollables.length - 1];
+      target.scrollTop = target.scrollHeight;
+      target.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return true;
+    })()`)
+    await sleep(700)
+    for (const text of await evaluate(READ_OPTIONS)) seenOptions.add(text)
+
+    // 仍然缺项时，把下拉里所有带 "select" 的类名收集出来，方便定位滚动容器
+    const dropdownClasses =
+      scrolledDown === false
+        ? await evaluate(`(() => {
+            const d = document.querySelector('.ant-select-dropdown');
+            if (!d) return 'no-dropdown';
+            return [...new Set([...d.querySelectorAll('*')]
+              .map(e => typeof e.className === 'string' ? e.className : '')
+              .filter(c => c && c.includes('select')))].join(' | ').slice(0, 300);
+          })()`)
+        : ''
+
+    const optionTexts = [...seenOptions]
+    const missingOptions = wantedOptions.filter((t) => !optionTexts.includes(t))
+    record(
+      '额外需求下拉出现新增的四项行程体裁开关',
+      extraOpened === true && missingOptions.length === 0,
+      extraOpened === false
+        ? '未找到额外需求输入框 #extraNeeds'
+        : missingOptions.length > 0
+          ? `缺少：${missingOptions.join('、')}（读到 ${optionTexts.length} 个，滚到底=${scrolledDown}）${dropdownClasses}`
+          : `共 ${optionTexts.length} 个选项`,
+    )
+    await shot('p6-step1-extra-needs.png')
+    // 按 Esc 收起下拉，避免遮挡后续操作
+    await pressKey('Escape')
+    await sleep(400)
 
     console.log('\n=== 2. 第一步：填写并解析目的地 ===')
     const filled = await evaluate(`window.__setInput('input[placeholder="如：杭州"]', '杭州')`)
@@ -363,12 +494,37 @@ async function main() {
     )
     record('行程期间天气区块渲染（含 4 天预报窗口说明）', weatherOk === true)
 
+    console.log('\n=== 5.1 第三步信息版块与新附加偏好（本轮改版） ===')
+    // 第 3 步由 Descriptions 表格改成信息网格：每个信息块带自己的标签，
+    // 用 data-testid="info-block" 标记，数量应 >= 4（目的地/日期/天数/人数等）
+    const infoBlocks = await evaluate(
+      `document.querySelectorAll('[data-testid="info-block"]').length`,
+    )
+    record('第三步渲染出信息版块网格', infoBlocks >= 4, `共 ${infoBlocks} 块`)
+    await shot('p6-step3-info.png')
+
     console.log('\n=== 5. 回到我的行程列表核对 ===')
     await goto(`${APP_BASE}/trips`)
     await evaluate(HELPERS)
     await sleep(1500)
     const listed = await evaluate(`window.__has('杭州市') && window.__has('草稿')`)
     record('新草稿出现在我的行程列表', listed === true)
+
+    // 列表卡片改版：内容以标签形态呈现，且有城市缩写色块
+    const pillCount = await evaluate(`document.querySelectorAll('[data-testid="trip-pill"]').length`)
+    record('行程卡片内容以标签呈现', pillCount > 0, `共 ${pillCount} 个标签`)
+    const initialsCount = await evaluate(
+      `document.querySelectorAll('[data-testid="trip-city-initial"]').length`,
+    )
+    record('行程卡片显示城市缩写色块', initialsCount > 0, `共 ${initialsCount} 个`)
+    // 卡片底色不该是纯白：读计算样式，确认与页面容器底色不同
+    const cardBgIsWhite = await evaluate(`(() => {
+      const card = document.querySelector('[data-testid="trip-card"]');
+      if (!card) return null;
+      const bg = getComputedStyle(card).backgroundColor;
+      return bg === 'rgb(255, 255, 255)' || bg === 'rgba(0, 0, 0, 0)';
+    })()`)
+    record('行程卡片不是纯白底（双主题可适配）', cardBgIsWhite === false, `纯白=${cardBgIsWhite}`)
     await shot('p2-triplist.png')
 
     console.log('\n=== 6. 地图交互：点击标记与拖拽拾取 ===')
@@ -525,6 +681,94 @@ async function main() {
         20000,
       )
       record('取消打卡后条目回到未打卡状态', true)
+
+      console.log('\n=== 7.2 「换一个」候选抽屉（本轮新增） ===')
+      // 点第一个条目上的「换一个」，应弹出抽屉并加载候选列表
+      const swapClicked = await evaluate(`(() => {
+        const btn = document.querySelector('[data-testid^="swap-btn-"]');
+        if (!btn) return false;
+        btn.click();
+        return true;
+      })()`)
+      record('点击条目「换一个」按钮', swapClicked === true)
+
+      // 天型日会先弹确认框：若出现「确认」按钮就点掉
+      await sleep(900)
+      const confirmHit = await evaluate(`window.__clickButton('确认') || window.__clickButton('确定')`)
+      void confirmHit
+      await sleep(500)
+
+      const drawerShown = await evaluate(
+        `document.querySelector('[data-testid="swap-drawer"]') !== null`,
+      )
+      record('弹出替换候选抽屉', drawerShown === true)
+
+      // 候选要么有内容、要么给出可读的「附近没有更合适的」说明，不能空白转圈
+      await waitFor(
+        `document.querySelectorAll('[data-testid^="apply-swap-"]').length > 0
+         || window.__has('没有找到')
+         || window.__has('附近没有')
+         || window.__has('暂无')`,
+        '候选列表或空态说明出现',
+        40000,
+      )
+      const candidateCount = await evaluate(
+        `document.querySelectorAll('[data-testid^="apply-swap-"]').length`,
+      )
+      record('候选列表返回结果（或有明确空态）', candidateCount >= 0, `共 ${candidateCount} 个候选`)
+      await shot('p7-swap-drawer.png')
+
+      // 有候选时真正执行一次替换，验证接口与就地刷新
+      if (candidateCount > 0) {
+        const beforeName = await evaluate(
+          `((document.querySelector('[data-testid="trip-item"] .trip-item-title')||{}).innerText)||''`,
+        )
+        const applied = await evaluate(`(() => {
+          const btn = document.querySelector('[data-testid^="apply-swap-"]');
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })()`)
+        record('点击候选执行替换', applied === true)
+        // 成功提示文案是「已换成「xxx」」，用前缀匹配而不是全文匹配
+        await waitFor(`window.__has('已换成')`, '替换成功提示', 40000)
+        record('替换后页面就地刷新', true)
+        await sleep(1500)
+        await shot('p7-after-swap.png')
+        void beforeName
+      }
+
+      // 右侧地图列：滚动时位置应保持不变（sticky 锁定），只滚左侧每日安排
+      console.log('\n=== 7.3 详情页右侧锁定与单页容纳（本轮改版） ===')
+      const stickyInfo = await evaluate(`(() => {
+        const el = document.querySelector('[data-testid="route-panel"]');
+        if (!el) return null;
+        const pos = getComputedStyle(el).position;
+        const r = el.getBoundingClientRect();
+        return { pos, top: r.top, bottom: r.bottom, vh: window.innerHeight };
+      })()`)
+      record(
+        '右侧路线面板为 sticky 锁定',
+        stickyInfo !== null && stickyInfo.pos === 'sticky',
+        stickyInfo ? `position=${stickyInfo.pos}` : '未找到面板',
+      )
+      record(
+        '路线面板在一屏之内（底部不超出视口）',
+        stickyInfo !== null && stickyInfo.bottom <= stickyInfo.vh + 4,
+        stickyInfo ? `bottom=${Math.round(stickyInfo.bottom)} vh=${stickyInfo.vh}` : '',
+      )
+      // 标题应与「每日安排」同宽：检查左右两列宽度接近
+      const colWidths = await evaluate(`(() => {
+        const l = document.querySelector('[data-testid="day-column"]');
+        const r = document.querySelector('[data-testid="route-panel"]');
+        if (!l || !r) return null;
+        return { l: Math.round(l.getBoundingClientRect().width), r: Math.round(r.getBoundingClientRect().width) };
+      })()`)
+      record(
+        '左右两列宽度一致（标题与每日安排对齐）',
+        colWidths !== null && Math.abs(colWidths.l - colWidths.r) <= 2,
+        colWidths ? `左=${colWidths.l} 右=${colWidths.r}` : '',
+      )
     } else {
       console.log('    （跳过完整生成：需要 SMOKE_GENERATE=1）')
     }

@@ -18,6 +18,7 @@ import {
   Card,
   Col,
   Descriptions,
+  Drawer,
   Empty,
   Radio,
   Row,
@@ -28,7 +29,7 @@ import {
   Typography,
 } from 'antd'
 import { theme as antdTheme } from 'antd'
-import { BookOutlined } from '@ant-design/icons'
+import { BookOutlined, SwapOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -36,8 +37,13 @@ import { fetchPoiPhotos, planRoute, type RouteMode, type RouteResult } from '../
 import { api, extractError } from '../api/client'
 import {
   checkinItem,
+  DAY_TYPE_LABEL,
+  getItemAlternatives,
   getTrip,
+  replaceItem,
   uncheckinItem,
+  type AlternativeCandidate,
+  type DayType,
   type TripDayData,
   type TripDetailData,
   type TripItemData,
@@ -50,6 +56,14 @@ const SLOT_LABEL: Record<string, string> = {
   noon: '中午',
   afternoon: '下午',
   evening: '晚上',
+}
+
+/** 各天型标记用的颜色。antd Tag 的语义色，白天黑夜都能看清 */
+const DAY_TYPE_COLOR: Record<string, string> = {
+  theme_park: 'purple',
+  hike: 'green',
+  night_hike: 'geekblue',
+  recovery: 'gold',
 }
 
 /** 出行方式选项。默认驾车，与排程时判定「通勤超 40 分钟就换点」用的口径一致 */
@@ -173,7 +187,7 @@ function ItemPhoto({ item }: { item: TripItemData }) {
 
 export default function TripDetail() {
   const { id = '' } = useParams()
-  const { message } = App.useApp()
+  const { message, modal } = App.useApp()
   const navigate = useNavigate()
   // antd 的主题 token：拿当前主题下的颜色值，保证白天/黑夜都协调
   const { token } = antdTheme.useToken()
@@ -201,6 +215,28 @@ export default function TripDetail() {
 
   /** 打卡中的条目集合，让按钮各自转圈而不是整页禁用 */
   const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set())
+
+  /** 「换一个」抽屉的开关与内容 */
+  const [swapOpen, setSwapOpen] = useState(false)
+  /** 正在替换的那个条目。抽屉标题与执行替换时都要用 */
+  const [swapTarget, setSwapTarget] = useState<TripItemData | null>(null)
+  const [candidates, setCandidates] = useState<AlternativeCandidate[]>([])
+  const [candidatesLoading, setCandidatesLoading] = useState(false)
+  const [candidatesError, setCandidatesError] = useState('')
+  /** 正在替换的候选 poiId，让对应那张卡片转圈 */
+  const [replacingPoiId, setReplacingPoiId] = useState<string | null>(null)
+
+  /**
+   * 地图的像素高度。
+   *
+   * 为什么要算而不写死：右列的卡片高度是 calc(100vh - 概要与留白)，
+   * 地图要填满卡片 body 的剩余空间，就必须知道视口有多高。
+   * 写死 520 在小屏上会把整页撑出滚动条，在大屏上又留出大片空白。
+   *
+   * 减去 460 的构成：顶部 app-header（约 64）+ 内容区内边距（约 36）
+   * + 行程概要卡（约 130）+ 右侧卡片头部与底部说明（约 200）。
+   */
+  const [mapHeight, setMapHeight] = useState(() => Math.max(300, window.innerHeight - 460))
 
   // --- 数据加载 ---------------------------------------------------------------
 
@@ -248,6 +284,15 @@ export default function TripDetail() {
     return () => {
       if (pollRef.current !== null) window.clearTimeout(pollRef.current)
     }
+  }, [])
+
+  // 视口尺寸变化时重算地图高度：右列锁定布局依赖它，不能只在挂载时算一次
+  useEffect(() => {
+    function syncMapHeight() {
+      setMapHeight(Math.max(300, window.innerHeight - 460))
+    }
+    window.addEventListener('resize', syncMapHeight)
+    return () => window.removeEventListener('resize', syncMapHeight)
   }, [])
 
   // --- 当天的派生数据 -----------------------------------------------------------
@@ -438,6 +483,91 @@ export default function TripDetail() {
     }
   }
 
+  // --- 换一个 -----------------------------------------------------------------
+
+  /**
+   * 打开替换候选抽屉。
+   *
+   * 天型日的处理：主题乐园整天、全天徒步这类日子，换掉唯一那个景点等于把
+   * 当天的结构改掉了（从「泡一整天」变成「上午一个下午一个」）。所以先弹确认，
+   * 让用户明确选择是「换一个同类的大景区」还是「换成普通行程」——
+   * 后者就按常规一天来排，用户自己承担结构变化。
+   */
+  async function openAlternatives(item: TripItemData) {
+    if (!trip) return
+
+    const dayType = (day?.dayType ?? 'normal') as DayType
+    const isSpecialDay = dayType === 'theme_park' || dayType === 'hike'
+
+    if (isSpecialDay) {
+      // 用 Modal 的静态方法做确认。这里没有用 App.useApp 的 modal，
+      // 因为只需要一个简单的二选一，静态调用足够且代码更短
+      const confirmed = await new Promise<boolean>((resolve) => {
+        const label = DAY_TYPE_LABEL[dayType] || '这一天'
+        const instance = modal.confirm({
+          title: '这一天是整天行程',
+          content: `${label}的结构是「一整天都在同一个地方」。换掉它会改变当天的安排结构，是否继续？`,
+          okText: '继续挑选替换',
+          cancelText: '算了',
+          onOk: () => {
+            instance.destroy()
+            resolve(true)
+          },
+          onCancel: () => {
+            instance.destroy()
+            resolve(false)
+          },
+        })
+      })
+      if (!confirmed) return
+    }
+
+    setSwapTarget(item)
+    setSwapOpen(true)
+    setCandidates([])
+    setCandidatesError('')
+    setCandidatesLoading(true)
+
+    try {
+      const { candidates: list } = await getItemAlternatives(trip.id, item.id)
+      setCandidates(list)
+    } catch (err) {
+      setCandidatesError(extractError(err, '候选地点查询失败'))
+    } finally {
+      setCandidatesLoading(false)
+    }
+  }
+
+  /** 把目标条目换成选中的候选 */
+  async function confirmReplace(candidate: AlternativeCandidate) {
+    if (!trip || !swapTarget) return
+    setReplacingPoiId(candidate.poiId)
+    try {
+      const updated = await replaceItem(trip.id, swapTarget.id, candidate.poiId)
+      // 就地替换条目。不重排整天的顺序——用户只换了这一个，
+      // 把其他条目的位置也一起动会让人困惑
+      setTrip((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          tripDays: prev.tripDays.map((d) => ({
+            ...d,
+            items: d.items.map((entry) => (entry.id === swapTarget.id ? updated : entry)),
+          })),
+        }
+      })
+      message.success(`已换成「${updated.name}」`)
+      setSwapOpen(false)
+      setSwapTarget(null)
+      // 换了地点，原来的路线缓存全部失效
+      routeCacheRef.current.clear()
+    } catch (err) {
+      message.error(extractError(err, '替换失败'))
+    } finally {
+      setReplacingPoiId(null)
+    }
+  }
+
   // --- 渲染辅助 -----------------------------------------------------------------
 
   /** 换算路段信息文案，如「驾车约 12 分钟 · 5.2 km」 */
@@ -534,11 +664,26 @@ export default function TripDetail() {
           <Empty description="这个行程还没有排好的天。生成完成后就能在这里看到每日安排。" />
         </Card>
       ) : (
-        <Row gutter={16}>
-          {/* ---- 左列：时段分组列表 ---- */}
-          <Col xs={24} lg={11}>
+        <Row gutter={16} align="top">
+          {/* ---- 左列：时段分组列表，独立滚动 ----
+              左右各占 12 格（等宽）：用户要求「标题宽度和每日安排对齐」，
+              11/13 的分法会让两张卡的标题栏一宽一窄，视觉上像没对齐 */}
+          <Col xs={24} lg={12} data-testid="day-column">
             <Card
               title="每日安排"
+              // 固定高度 + 内部滚动：外层页面不再整体滚动，右侧地图就始终留在视野里。
+              // 高度 = 视口高度 − 顶栏 − 内容区上下内边距 − 行程概要卡，
+              // 收敛后的值保证一屏能放下，不产生外层滚动条
+              style={{ height: 'calc(100vh - 248px)', display: 'flex', flexDirection: 'column' }}
+              styles={{
+                body: {
+                  flex: 1,
+                  minHeight: 0,
+                  overflowY: 'auto',
+                  // 滚动条与卡片内边距对齐，避免内容贴边
+                  paddingRight: 12,
+                },
+              }}
               extra={
                 dayItems.length > 0 && (
                   <Typography.Text type="secondary" data-testid="checkin-progress">
@@ -573,6 +718,16 @@ export default function TripDetail() {
 
               {day && (
                 <div style={{ marginBottom: 12 }}>
+                  {/* 天型标记：这一天的结构不同于常规（整天泡乐园、全天徒步、夜爬、恢复日），
+                      不标出来用户会以为排漏了 */}
+                  {day.dayType && day.dayType !== 'normal' && (
+                    <div style={{ marginBottom: 6 }}>
+                      <Tag color={DAY_TYPE_COLOR[day.dayType] ?? 'default'}>
+                        {DAY_TYPE_LABEL[day.dayType]}
+                      </Tag>
+                      {day.intensity === 'light' && <Tag color="cyan">节奏轻松</Tag>}
+                    </div>
+                  )}
                   {day.summary && (
                     <Typography.Paragraph style={{ marginBottom: 4 }} strong>
                       {day.summary}
@@ -614,7 +769,7 @@ export default function TripDetail() {
                           style={{
                             margin: '8px 0',
                             padding: '10px 12px',
-                            borderRadius: 8,
+                            borderRadius: token.borderRadius,
                             // 颜色全部取主题 token：白天/黑夜两套自动适配，
                             // 写死浅色会在黑夜模式下出现「白底白字」看不见的问题
                             border: isSelected
@@ -622,17 +777,21 @@ export default function TripDetail() {
                               : isTarget
                                 ? `1px solid ${token.colorPrimaryBorder}`
                                 : `1px solid ${token.colorBorderSecondary}`,
+                            // 底色用极淡的主题填充而不是纯白 Card 底：
+                            // 白底在黑夜模式下是一块亮斑，在白天模式下又和背景糊在一起。
+                            // 已打卡的再压一档，视觉上「沉下去」
                             background: done
-                              ? token.colorFillQuaternary
+                              ? token.colorFillSecondary
                               : isSelected
                                 ? token.colorPrimaryBg
-                                : token.colorBgContainer,
+                                : token.colorFillQuaternary,
                             opacity: done ? 0.68 : 1,
                             cursor: 'pointer',
                             transition: 'all .2s',
                           }}
                         >
-                          <Space size={8} align="center" wrap>
+                          {/* 标题行：名称 + 一排状态标签 */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             {/* 打卡状态圆点：未打卡空心 / 已打卡实心带对勾 / 当前目标脉冲 */}
                             {done ? (
                               <span
@@ -641,7 +800,7 @@ export default function TripDetail() {
                                   width: 18,
                                   height: 18,
                                   borderRadius: '50%',
-                                  background: '#52c41a',
+                                  background: token.colorSuccess,
                                   color: '#fff',
                                   fontSize: 11,
                                   alignItems: 'center',
@@ -665,16 +824,25 @@ export default function TripDetail() {
                               />
                             )}
 
-                            <Typography.Text strong style={{ textDecoration: done ? 'line-through' : undefined }}>
+                            <Typography.Text
+                              strong
+                              style={{ textDecoration: done ? 'line-through' : undefined }}
+                              className="trip-item-title"
+                              data-testid="trip-item-title"
+                            >
                               {item.name}
                             </Typography.Text>
                             <Tag color={item.itemType === 'restaurant' ? 'orange' : 'blue'}>
                               {item.itemType === 'restaurant' ? '餐厅' : '景点'}
                             </Tag>
                             {isTarget && <Tag color="processing">当前目标</Tag>}
-                            {item.rating && <Tag>评分 {item.rating}</Tag>}
+                            {item.rating && (
+                              <Tag color={Number(item.rating) >= 4.5 ? 'green' : 'default'}>
+                                评分 {item.rating}
+                              </Tag>
+                            )}
                             {item.cost && <Tag>人均 ¥{item.cost}</Tag>}
-                          </Space>
+                          </div>
 
                           <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                             {/* 左侧信息区 */}
@@ -724,6 +892,17 @@ export default function TripDetail() {
                                   打卡于 {dayjs(item.checkedAt).format('HH:mm')}
                                 </Typography.Text>
                               )}
+                              {/* 换一个：看过评价不满意时，在可行距离内换同类型的景点或餐厅。
+                                  主题乐园整天、爬山这类天型会先弹确认，因为它们换掉会改变当天结构 */}
+                              <Button
+                                size="small"
+                                data-testid={`swap-btn-${item.id}`}
+                                icon={<SwapOutlined />}
+                                disabled={trip.status === 'generating'}
+                                onClick={() => void openAlternatives(item)}
+                              >
+                                换一个
+                              </Button>
                               {/* 小红书攻略：只做关键词跳转搜索页，不抓取任何内容。
                                   点击在浏览器新标签打开该地点的攻略搜索结果 */}
                               <Button
@@ -760,10 +939,35 @@ export default function TripDetail() {
             </Card>
           </Col>
 
-          {/* ---- 右列：地图联动 ---- */}
-          <Col xs={24} lg={13}>
+          {/* ---- 右列：地图联动。整列固定在视口内，滚动时不动 ----
+              与左列等宽（12/12），保证两个标题栏宽度一致 */}
+          <Col
+            xs={24}
+            lg={12}
+            data-testid="route-panel"
+            style={{
+              // 与左列同高，且用 sticky 钉在视口顶部：
+              // 左列内部滚动时右列不跟着动，地图始终可见
+              position: 'sticky',
+              top: 0,
+              height: 'calc(100vh - 248px)',
+            }}
+          >
             <Card
-              title="当日路线"
+              // 标题用「日期 + 当日路线」而不是孤零零的「当日路线」，
+              // 这样它能和左边「每日安排」的标题栏视觉宽度对齐（都在卡片顶部同一行）
+              title={day ? `${dayjs(day.date).format('M月D日')} 当日路线` : '当日路线'}
+              style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+              styles={{
+                body: {
+                  flex: 1,
+                  minHeight: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  // 收紧内边距，把地图往上提，腾出一屏的空间
+                  paddingTop: 12,
+                },
+              }}
               extra={
                 <Radio.Group
                   size="small"
@@ -774,15 +978,19 @@ export default function TripDetail() {
                 />
               }
             >
-              <AmapMap
-                center={mapCenter}
-                zoom={14}
-                markers={markers}
-                polyline={mapPolyline}
-                onMarkerClick={(markerId) => setSelectedItemId(markerId === '__stay__' ? null : markerId)}
-                height={520}
-                fitToContent
-              />
+              {/* 地图高度按视口算：卡片可用高度减去卡片头部、底部说明与内边距，
+                  让地图自适应剩余空间。写死像素值在小屏上会溢出到屏幕外 */}
+              <div style={{ flex: 1, minHeight: 260 }}>
+                <AmapMap
+                  center={mapCenter}
+                  zoom={14}
+                  markers={markers}
+                  polyline={mapPolyline}
+                  onMarkerClick={(markerId) => setSelectedItemId(markerId === '__stay__' ? null : markerId)}
+                  height={mapHeight}
+                  fitToContent
+                />
+              </div>
 
               <div style={{ marginTop: 8 }}>
                 {routeLoading && (
@@ -806,14 +1014,146 @@ export default function TripDetail() {
               </div>
 
               {trip.stayResolved && trip.stayName && (
-                <Descriptions column={1} size="small" style={{ marginTop: 12 }}>
-                  <Descriptions.Item label="住宿锚点">{trip.stayName}</Descriptions.Item>
-                </Descriptions>
+                <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 6 }}>
+                  住宿锚点：{trip.stayName}
+                </Typography.Text>
               )}
             </Card>
           </Col>
         </Row>
       )}
+
+      {/* ---- 换一个：候选抽屉 ---- */}
+      <Drawer
+        open={swapOpen}
+        onClose={() => setSwapOpen(false)}
+        // antd 6 用 size 表达抽屉宽度，旧的 width 已弃用
+        size="default"
+        title={swapTarget ? `替换「${swapTarget.name}」` : '替换地点'}
+        data-testid="swap-drawer"
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          以下候选都在可行距离内（与前后两站的通勤不超过 40 分钟），
+          且评分与营业时间符合这一天的时段要求。换掉后当天顺序不变。
+        </Typography.Paragraph>
+
+        {candidatesLoading && (
+          <div style={{ padding: '32px 0', textAlign: 'center' }}>
+            <Spin />
+            <div style={{ marginTop: 12 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                正在查询附近符合条件的候选，并核对通勤时间…
+              </Typography.Text>
+            </div>
+          </div>
+        )}
+
+        {!candidatesLoading && candidatesError && (
+          <Alert type="error" showIcon title="查询失败" description={candidatesError} />
+        )}
+
+        {!candidatesLoading && !candidatesError && candidates.length === 0 && (
+          <Empty
+            description={
+              <span style={{ fontSize: 13 }}>
+                附近没有符合条件的替换地点
+                <br />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  可能是这一带同类地点较少，或评分都低于 4 分。
+                </Typography.Text>
+              </span>
+            }
+          />
+        )}
+
+        {!candidatesLoading &&
+          candidates.map((candidate) => (
+            <div
+              key={candidate.poiId}
+              data-testid="swap-candidate"
+              style={{
+                display: 'flex',
+                gap: 10,
+                padding: 12,
+                marginBottom: 10,
+                borderRadius: token.borderRadius,
+                background: token.colorFillQuaternary,
+                border: `1px solid ${token.colorBorderSecondary}`,
+              }}
+            >
+              {/* 候选缩略图。没有图时留一个安静的占位块 */}
+              {candidate.photos.length > 0 ? (
+                <img
+                  src={candidate.photos[0]}
+                  alt={candidate.name}
+                  style={{
+                    width: 56,
+                    height: 56,
+                    flexShrink: 0,
+                    objectFit: 'cover',
+                    borderRadius: 8,
+                  }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: 56,
+                    height: 56,
+                    flexShrink: 0,
+                    borderRadius: 8,
+                    background: token.colorFillSecondary,
+                  }}
+                />
+              )}
+
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  {candidate.name}
+                </Typography.Text>
+
+                <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {candidate.rating && (
+                    <Tag color={Number(candidate.rating) >= 4.5 ? 'green' : 'default'}>
+                      评分 {candidate.rating}
+                    </Tag>
+                  )}
+                  {candidate.cost && <Tag>人均 ¥{candidate.cost}</Tag>}
+                </div>
+
+                <div style={{ marginTop: 4 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {/* 通勤时间是真实路径规划的结果，用户最关心的就是这个 */}
+                    {candidate.commuteFromPrevMinutes !== null
+                      ? `距上一站约 ${candidate.commuteFromPrevMinutes} 分钟`
+                      : `距上一站约 ${candidate.distanceFromPrevKm} km`}
+                    {candidate.commuteToNextMinutes !== null &&
+                      ` · 到下一站约 ${candidate.commuteToNextMinutes} 分钟`}
+                  </Typography.Text>
+                </div>
+
+                {candidate.openTimeText && (
+                  <div style={{ marginTop: 2 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {candidate.openTimeText}
+                    </Typography.Text>
+                  </div>
+                )}
+
+                <Button
+                  size="small"
+                  type="primary"
+                  style={{ marginTop: 8 }}
+                  loading={replacingPoiId === candidate.poiId}
+                  disabled={replacingPoiId !== null && replacingPoiId !== candidate.poiId}
+                  data-testid={`apply-swap-${candidate.poiId}`}
+                  onClick={() => void confirmReplace(candidate)}
+                >
+                  换成这个
+                </Button>
+              </div>
+            </div>
+          ))}
+      </Drawer>
     </div>
   )
 }

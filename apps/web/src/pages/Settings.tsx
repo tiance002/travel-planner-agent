@@ -5,12 +5,29 @@
 // 密码同理：新旧密码都只在提交瞬间存在，任何接口都不会回显。
 
 import {
+  EyeInvisibleOutlined,
   KeyOutlined,
+  LockOutlined,
+  SafetyCertificateOutlined,
   UploadOutlined,
   UserOutlined,
 } from '@ant-design/icons'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Alert, App, Avatar, Button, Card, Descriptions, Input, Popconfirm, Select, Space, Tag, Typography } from 'antd'
+import {
+  Alert,
+  App,
+  Avatar,
+  Button,
+  Card,
+  Descriptions,
+  Input,
+  Popconfirm,
+  Select,
+  Space,
+  Tag,
+  Typography,
+  theme as antdTheme,
+} from 'antd'
 import { setToken } from '../auth'
 import { extractError } from '../api/client'
 import {
@@ -454,17 +471,27 @@ export default function Settings() {
               onChange={(event) => setModelName(event.target.value)}
             />
             {activeProvider && activeProvider.models.length > 0 && (
-              <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {activeProvider.models.map((item) => (
-                  <Tag
-                    key={item}
-                    style={{ cursor: 'pointer' }}
-                    color={modelName === item ? 'blue' : undefined}
-                    onClick={() => setModelName(item)}
-                  >
-                    {item}
-                  </Tag>
-                ))}
+              // 推荐模型改成「可点即填」的胶囊列表：比纯 Tag 更容易看出哪些能点
+              <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {activeProvider.models.map((item) => {
+                  const active = modelName === item
+                  return (
+                    <Tag
+                      key={item}
+                      style={{
+                        cursor: 'pointer',
+                        marginInlineEnd: 0,
+                        padding: '3px 10px',
+                        borderRadius: 999,
+                      }}
+                      color={active ? 'blue' : undefined}
+                      onClick={() => setModelName(item)}
+                    >
+                      {item}
+                      {active ? ' ✓' : ''}
+                    </Tag>
+                  )
+                })}
               </div>
             )}
           </Field>
@@ -534,17 +561,77 @@ export default function Settings() {
         </div>
       </Card>
 
+      {/* 密钥保护的说明。早先是两段并列的灰字，信息密度不均、也没有视觉层次。
+          改成三张带图标的小卡：每张只说一件事，扫一眼就知道系统做了什么 */}
       <Card title="密钥是怎么被保护的" size="small">
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-          API Key 提交后会用 AES-256-GCM 算法加密再写入数据库，加密用的主密钥只存在于服务器
-          的环境变量里，不随代码或数据库一起泄露。GCM 模式还会附带完整性校验，密文被改动一个
-          字节就会解密失败，而不是悄悄读出错误内容。
-        </Typography.Paragraph>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          页面上的查询接口只返回类似 <code>sk-abc••••••••klmn</code> 的掩码，明文永远不会再
-          回到浏览器。
-        </Typography.Paragraph>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+            gap: 10,
+          }}
+        >
+          <SecurityNote
+            icon={<LockOutlined />}
+            title="加密后入库"
+            text="API Key 提交后先用 AES-256-GCM 算法加密，再写入数据库。加密用的主密钥只存在于服务器的环境变量里，不随代码或数据库一起泄露。"
+          />
+          <SecurityNote
+            icon={<SafetyCertificateOutlined />}
+            title="完整性校验"
+            text="GCM 模式自带完整性校验。密文被改动一个字节就会解密失败并报错，而不是悄悄读出错误的内容。"
+          />
+          <SecurityNote
+            icon={<EyeInvisibleOutlined />}
+            title="明文不出服务器"
+            text="页面上的查询接口只返回类似 sk-abc••••••••klmn 的掩码。明文永远不会再回到浏览器。"
+          />
+        </div>
       </Card>
+    </div>
+  )
+}
+
+/**
+ * 安全说明的一条。
+ * 图标 + 标题 + 正文的三层结构，比原来两段并列的灰字更容易扫读。
+ */
+function SecurityNote({
+  icon,
+  title,
+  text,
+}: {
+  icon: ReactNode
+  title: string
+  text: string
+}) {
+  const { token } = antdTheme.useToken()
+  return (
+    <div
+      style={{
+        padding: '12px 14px',
+        borderRadius: token.borderRadius,
+        background: token.colorFillQuaternary,
+        border: `1px solid ${token.colorBorderSecondary}`,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          marginBottom: 6,
+          color: token.colorPrimary,
+          fontWeight: 500,
+          fontSize: 13,
+        }}
+      >
+        {icon}
+        {title}
+      </div>
+      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+        {text}
+      </Typography.Text>
     </div>
   )
 }
@@ -591,7 +678,9 @@ function compressImage(file: File, size: number): Promise<string> {
   })
 }
 
-// 表单行：标题 + 说明 + 控件，统一间距
+// 表单行：标题 + 说明 + 控件，统一间距。
+// hint 的颜色取自主题 token —— 早先写死 rgba(128,128,128,.85)，
+// 在黑夜模式那种深底上会糊得看不清
 function Field({
   label,
   hint,
@@ -601,12 +690,13 @@ function Field({
   hint?: string
   children: ReactNode
 }) {
+  const { token } = antdTheme.useToken()
   return (
     <div style={{ marginBottom: 20 }}>
       <div style={{ marginBottom: 6, fontWeight: 500 }}>{label}</div>
       {children}
       {hint && (
-        <div style={{ marginTop: 6, fontSize: 12, color: 'rgba(128,128,128,0.85)' }}>{hint}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: token.colorTextTertiary }}>{hint}</div>
       )}
     </div>
   )

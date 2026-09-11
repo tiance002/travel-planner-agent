@@ -8,7 +8,7 @@
 //   2. 地图实例只创建一次，组件卸载时彻底销毁，防止 React 严格模式下重复初始化；
 //   3. 脚本加载失败时给出可读的提示，而不是留一块白板。
 
-import { Spin, Typography } from 'antd'
+import { Spin, Typography, theme as antdTheme } from 'antd'
 import { useEffect, useRef, useState } from 'react'
 import { loadAmap, type AmapEvent, type AmapMapInstance, type AmapOverlay } from '../amap/loader'
 
@@ -123,6 +123,7 @@ export default function AmapMap({
   fitToContent = false,
   height = 460,
 }: AmapMapProps) {
+  const { token } = antdTheme.useToken()
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<AmapMapInstance | null>(null)
   const overlaysRef = useRef<AmapOverlay[]>([])
@@ -248,11 +249,20 @@ export default function AmapMap({
   }, [status, markers, polyline, fitToContent])
 
   return (
-    <div style={{ position: 'relative', height, borderRadius: 8, overflow: 'hidden', background: '#f0f2f5' }}>
+    <div
+      style={{
+        position: 'relative',
+        height,
+        borderRadius: 8,
+        overflow: 'hidden',
+        // 底色跟随主题：写死 #f0f2f5 会在黑夜模式下闪出一块浅灰
+        background: token.colorFillTertiary,
+      }}
+    >
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
 
       {status === 'loading' && (
-        <div style={overlayStyle}>
+        <div style={overlayStyle(token.colorBgContainer)}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
             <Spin size="large" />
             <Typography.Text type="secondary">地图加载中…</Typography.Text>
@@ -261,7 +271,7 @@ export default function AmapMap({
       )}
 
       {status === 'error' && (
-        <div style={overlayStyle}>
+        <div style={overlayStyle(token.colorBgContainer)}>
           <Typography.Text type="danger" style={{ maxWidth: 320, textAlign: 'center' }}>
             {errorText}
           </Typography.Text>
@@ -271,11 +281,19 @@ export default function AmapMap({
   )
 }
 
-const overlayStyle: React.CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  background: 'rgba(255,255,255,.85)',
+/**
+ * 遮罩层样式。背景色由调用方传入当前主题的容器色——
+ * 写死 rgba(255,255,255,.85) 在黑夜模式下会是一块刺眼的白板。
+ */
+function overlayStyle(background: string): React.CSSProperties {
+  return {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // 稍微透明一点，让底下的地图轮廓透出来，暗示「马上就好」
+    background,
+    opacity: 0.92,
+  }
 }

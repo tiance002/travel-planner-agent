@@ -130,6 +130,12 @@ model TripDay {
   /// 当日一句话概述
   summary String?
 
+  /// 这一天的行程体裁：normal 常规 / theme_park 主题乐园整天 / hike 高强度徒步 /
+  /// night_hike 夜爬看日出 / recovery 恢复日（前一天消耗大时自动降档）
+  dayType String @default("normal")
+  /// 这一天的体力强度：light / medium / heavy。唯一作用是给次日做输入
+  intensity String @default("medium")
+
   trip  Trip       @relation(fields: [tripId], references: [id], onDelete: Cascade)
   items TripItem[]
 
@@ -162,6 +168,8 @@ model TripItem {
   cost String?
   /// 特色内容（特色菜），仅美食 POI 返回
   tag String?
+  /// 高德分类编码。用于判断是不是餐厅、以及替换时找同类型候选
+  typecode String?
   /// 营业时间原文。缺失时前端显示「营业时间未知」
   openTimeText String?
   /// 推荐理由

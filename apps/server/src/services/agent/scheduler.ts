@@ -15,8 +15,24 @@
 // 校验跟着对齐，某一天排坏了能立刻发现，不必等所有天都跑完。
 
 import { planRoute, straightLineDistance, type Poi } from '../amap'
+import {
+  checkRating,
+  checkSlotHours,
+  isRatingReject,
+  maxSpotsForDay,
+  resolveDayType,
+  resolveIntensity,
+  type DayType,
+  type DayTypeBan,
+  type Intensity,
+} from './spot-rules'
 
-/** 每天游览类地点的上限。餐厅不计入 */
+/**
+ * 每天游览类地点的上限（常规一天的默认值）。餐厅不计入。
+ *
+ * 注意：这只是 normal 天型的默认值。主题乐园整天、爬山、夜爬这几种天型
+ * 的实际上限只有 1 个，恢复日是 2 个，具体取值见 spot-rules 的 maxSpotsForDay。
+ */
 export const MAX_SPOTS_PER_DAY = 3
 
 /** 相邻两点可接受的最大通勤时间（分钟），超过就换点 */
@@ -37,6 +53,8 @@ export interface PlannedItem {
   slot: string
   note: string
   orderIndex: number
+  /** 高德分类编码。用于判断是不是餐厅、以及替换时找同类型候选 */
+  typecode: string
   /** 与前一个地点之间的真实通勤分钟数。0 表示当天第一个地点（从住宿出发） */
   commuteMinutes: number | null
   /** 景点照片 URL 列表（来自高德 POI 的 photos，最多 3 张），详情页展示用 */
@@ -47,6 +65,10 @@ export interface PlannedDay {
   dayIndex: number
   summary: string
   items: PlannedItem[]
+  /** 这一天的行程体裁。主题乐园整天、爬山、夜爬、恢复日等，影响时段结构与景点上限 */
+  dayType: DayType
+  /** 这一天的体力强度。唯一的作用是给次日做输入：heavy 之后应当是 light */
+  intensity: Intensity
 }
 
 /** 单天校验的产出 */
@@ -60,6 +82,13 @@ export interface DayValidation {
 export interface ValidateDayOptions {
   /** 前几天已经用过的 poiId。跨天去重要靠它，免得第 2 天又把第 1 天的景点排一遍 */
   usedPoiIds?: Set<string>
+  /** 用户在额外需求里勾选的天型黑名单（不爬山、不要主题乐园整天等） */
+  ban?: DayTypeBan
+  /**
+   * 上一天的状态。跨天传导全靠它：
+   * 昨天夜爬或爬了一天山，今天就该自动降档成恢复日。
+   */
+  previousDayState?: { dayType: DayType; intensity: Intensity } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +567,7 @@ function toPlannedItem(
     slot,
     note,
     orderIndex,
+    typecode: poi.typecode,
     commuteMinutes: null,
     // 照片最多存 3 张：详情页首屏够用，也避免 JSON 字段无限膨胀
     photos: poi.photos.slice(0, 3),
@@ -545,22 +575,71 @@ function toPlannedItem(
 }
 
 /**
- * 把一天内的地点重排成「景点 → 餐厅 → 景点 → 餐厅 → 景点」的顺序。
+ * 把一天内的地点排成「景点 → 餐厅 → 景点 → 餐厅 → 景点」的顺序，并按天型分配时段。
  *
  * 餐厅为什么不能单独成段：用户不会「专程去吃个饭再回去玩」，
  * 餐厅的合理位置是在两个景点之间顺手解决一顿。所以顺序由代码排定，
  * 不依赖模型自觉。
+ *
+ * 天型的分支逻辑（这是「大景区整天」「爬山」「夜爬」能排对的关键）：
+ *   - normal：景点依次占 morning / afternoon / evening
+ *   - theme_park / hike：唯一景点占 morning + afternoon（上下午都在同一个地方），
+ *     园内或附近的餐厅插在 noon，最后一个景点之后的餐厅算 evening
+ *   - night_hike：白天不排景点（要休整），只留 noon 的提前吃饭 + evening 的出发
+ *   - recovery：从 afternoon 开始，最多 2 个，上午留空（补觉）
  */
-function arrangeDay(items: { poi: Poi; note: string }[]): { poi: Poi; note: string; slot: string }[] {
+function arrangeDay(
+  items: { poi: Poi; note: string }[],
+  dayType: DayType = 'normal',
+): { poi: Poi; note: string; slot: string }[] {
   const spots = items.filter((i) => !isRestaurant(i.poi))
   const restaurants = items.filter((i) => isRestaurant(i.poi))
 
   // 一个景点都没有的「整天」没有意义，直接清空，由上层提示
   if (spots.length === 0) return []
 
-  // 景点按 morning → afternoon → evening 依次分配时段
-  const spotSlots = ['morning', 'afternoon', 'evening']
   const result: { poi: Poi; note: string; slot: string }[] = []
+
+  // 「一整天只玩这一个」的天型：景点占上午 + 下午，餐厅插在中午
+  if (dayType === 'theme_park' || dayType === 'hike') {
+    const main = spots[0]
+    result.push({ poi: main.poi, note: main.note, slot: 'morning' })
+    // 上下午都在同一地点，这里再补一条 afternoon 记录表示「继续在这里」
+    // 之所以用两条记录而不是一条带时长的记录：前端的分组渲染是按 slot 走的，
+    // 拆成两条能让「上午」「下午」两个分组都出现这个地点，符合用户直觉
+    result.push({ poi: main.poi, note: main.note, slot: 'afternoon' })
+
+    const restaurant = restaurants.shift()
+    if (restaurant) {
+      result.push({ poi: restaurant.poi, note: restaurant.note, slot: 'noon' })
+    }
+    // 晚上可以再去个轻松的地方（小吃街、夜景），这段由模型在 items 里给出，
+    // 会落到下面 evening 的分支
+    const eveningSpot = spots[1]
+    if (eveningSpot) {
+      result.push({ poi: eveningSpot.poi, note: eveningSpot.note, slot: 'evening' })
+      const eveningRestaurant = restaurants.shift()
+      if (eveningRestaurant) {
+        result.push({ poi: eveningRestaurant.poi, note: eveningRestaurant.note, slot: 'evening' })
+      }
+    }
+    return result
+  }
+
+  // 夜爬看日出：白天要休整，不排景点；傍晚提前吃饭，然后出发
+  if (dayType === 'night_hike') {
+    const main = spots[0]
+    const restaurant = restaurants.shift()
+    if (restaurant) {
+      result.push({ poi: restaurant.poi, note: restaurant.note, slot: 'noon' })
+    }
+    result.push({ poi: main.poi, note: main.note, slot: 'evening' })
+    return result
+  }
+
+  // 恢复日：上午补觉，从下午开始
+  const spotSlots =
+    dayType === 'recovery' ? ['afternoon', 'evening'] : ['morning', 'afternoon', 'evening']
 
   // 每个景点后面最多跟一家餐厅，形成「景点 → 餐饮 → 景点 → 餐饮」的交替节奏。
   //
@@ -626,6 +705,7 @@ export function validateDay(
     throw new Error('模型没有给出这一天的地点安排')
   }
 
+  const ban = options.ban ?? {}
   const rawItems = Array.isArray(rawDay.items) ? (rawDay.items as RawItem[]) : []
   const collected: { poi: Poi; note: string }[] = []
 
@@ -651,26 +731,99 @@ export function validateDay(
       continue
     }
 
+    const asRestaurant = isRestaurant(poi)
+
+    // 闸门一：评分下限。景点硬卡 4 分；餐厅放宽到 3.5（高德餐厅评分普遍偏低，
+    // 硬卡会出现「这一天找不到餐厅」）。评分缺失（null）一律放行——
+    // 高德有大量 POI 没有评分，砍掉会误杀一批真正值得去的地方。
+    if (isRatingReject(poi, asRestaurant)) {
+      warnings.push(
+        `第 ${dayIndex} 天的「${poi.name}」评分 ${poi.rating} 低于 ${asRestaurant ? '3.5' : '4'} 分，已略去`,
+      )
+      continue
+    }
+
     collected.push({
       poi,
       note: typeof rawItem.note === 'string' ? rawItem.note.slice(0, 200) : '',
     })
   }
 
-  // 这时 collected 里已经全是「可信且未重复」的地点，记进已用集合，
-  // 后续换点时就能避开今天剩余的位置
+  // 这时 collected 里已经全是「可信、未重复、评分达标」的地点。
+  // 注意还没有记进 usedPoiIds——营业时间校验可能会再淘汰一批，
+  // 被淘汰的不算「去过」，后面几天若想用它当替代仍应允许。
+
+  // 闸门二：营业时间与时段。这里拿模型给的 slot 做预检，
+  // 因为真正的时段要等 arrangeDay 排完才定，但模型的意图有参考价值。
+  const hoursChecked = collected.filter((entry) => {
+    const asRestaurant = isRestaurant(entry.poi)
+    const rawSlot = rawSlotOf(rawItems, entry.poi.poiId)
+    const check = checkSlotHours(entry.poi, rawSlot, asRestaurant)
+
+    if (check.verdict === 'closed') {
+      warnings.push(`第 ${dayIndex} 天${check.detail}，已略去`)
+      return false
+    }
+    if (check.verdict === 'tight') {
+      warnings.push(`第 ${dayIndex} 天${check.detail}，请提前安排`)
+    }
+    return true
+  })
+
+  collected.length = 0
+  collected.push(...hoursChecked)
+
+  // ---- 天型判定：模型提议 + 规则兜底 ----------------------------------------
+  const spots = collected.filter((c) => !isRestaurant(c.poi)).map((c) => c.poi)
+  const banResult = { ...ban }
+
+  // 跨天传导：前一天是夜爬或爬了一整天山，今天强制降档为恢复日。
+  // 这是「夜爬会影响第二天」这条需求唯一的实现点——不需要额外的机制，
+  // 强度从第 N 天流向第 N+1 天就够了。
+  const previous = options.previousDayState
+  const needsRecovery =
+    previous && (previous.dayType === 'night_hike' || previous.intensity === 'heavy')
+
+  let dayType: DayType
+  if (needsRecovery) {
+    dayType = 'recovery'
+    warnings.push(
+      previous?.dayType === 'night_hike'
+        ? `前一天安排了夜爬看日出，这天按恢复日安排：上午补觉，只排轻松的地点`
+        : `前一天体力消耗较大，这天按恢复日安排，节奏放缓`,
+    )
+    // 恢复日里也不该出现高强度地点
+    banResult.noHike = true
+  } else {
+    const resolved = resolveDayType({
+      proposed: rawStyleOf(rawDay),
+      spots,
+      ban: banResult,
+    })
+    dayType = resolved.dayType
+    warnings.push(...resolved.warnings)
+  }
+
+  const intensity = resolveIntensity(dayType, banResult)
+
+  // 记进已用集合。放在天型判定之后、arrangeDay 之前：
+  // 从这里开始这批地点就算「确定要用」了。
   for (const entry of collected) options.usedPoiIds?.add(entry.poi.poiId)
 
-  // 截断超量的游览地点。餐厅不计入上限，所以先按类型分开数
+  // 截断超量的游览地点。上限按天型取：常规 3、恢复日 2、整天型 1。
+  // 餐厅不计入上限，所以先按类型分开数。
+  const spotLimit = maxSpotsForDay(dayType)
   const spotCount = collected.filter((c) => !isRestaurant(c.poi)).length
-  if (spotCount > MAX_SPOTS_PER_DAY) {
+  if (spotCount > spotLimit) {
     let keptSpots = 0
     const trimmed = collected.filter((c) => {
       if (isRestaurant(c.poi)) return true
       keptSpots += 1
-      return keptSpots <= MAX_SPOTS_PER_DAY
+      return keptSpots <= spotLimit
     })
-    warnings.push(`第 ${dayIndex} 天原本安排了 ${spotCount} 个景点，已按规则裁剪到 ${MAX_SPOTS_PER_DAY} 个`)
+    warnings.push(
+      `第 ${dayIndex} 天原本安排了 ${spotCount} 个景点，已按${dayType === 'normal' ? '常规' : '当天类型'}的规则裁剪到 ${spotLimit} 个`,
+    )
     collected.length = 0
     collected.push(...trimmed)
   }
@@ -680,12 +833,12 @@ export function validateDay(
       ? rawDay.summary.trim().slice(0, 120)
       : ''
 
-  const arranged = arrangeDay(collected)
+  const arranged = arrangeDay(collected, dayType)
   if (arranged.length === 0) {
     if (collected.length > 0) {
       warnings.push(`第 ${dayIndex} 天只有餐厅、没有景点，已清空（餐厅不会单独占一天）`)
     }
-    return { day: { dayIndex, summary, items: [] }, warnings }
+    return { day: { dayIndex, summary, items: [], dayType, intensity }, warnings }
   }
 
   // 餐厅比景点还多时，多出来的那几家没有合法位置——放哪都会和另一家连排，
@@ -699,16 +852,34 @@ export function validateDay(
     )
   }
 
+  // 排完时段后再校验一次营业时间。这次用的是最终确定的 slot，比预检更准。
+  // 只记 warning 不删条目：到这里地点已经排好顺序，删掉会破坏整天的结构，
+  // 提示用户「这天可能赶不上」比无声删掉一个地点更诚实。
   const items = arranged.map((entry, index) =>
     toPlannedItem(entry.poi, entry.note, entry.slot, index + 1),
   )
 
-  // 记进已用集合，供跨天去重与换点使用。
-  // 只记最终留下的：被裁掉的候选（例如第 4 个景点）不算「去过」，
-  // 后面几天若想用它当替代，仍然允许。
-  for (const item of items) options.usedPoiIds?.add(item.poiId)
+  for (const item of items) {
+    const poi = registry.get(item.poiId)
+    if (!poi) continue
+    const check = checkSlotHours(poi, item.slot, isRestaurant(poi))
+    if (check.verdict === 'tight') warnings.push(`第 ${dayIndex} 天${check.detail}`)
+  }
 
-  return { day: { dayIndex, summary, items }, warnings }
+  return { day: { dayIndex, summary, items, dayType, intensity }, warnings }
+}
+
+/** 取出模型给某个 poiId 原始标注的 slot。找不到时返回 morning */
+function rawSlotOf(rawItems: RawItem[], poiId: string): string {
+  const hit = rawItems.find((item) => item.poiId === poiId)
+  const slot = typeof hit?.slot === 'string' ? hit.slot : ''
+  return slot || 'morning'
+}
+
+/** 取出模型提议的天型（dayStyle 字段） */
+function rawStyleOf(rawDay: RawDay): string {
+  const style = (rawDay as { dayStyle?: unknown }).dayStyle
+  return typeof style === 'string' ? style : ''
 }
 
 /**
@@ -767,6 +938,8 @@ export async function optimizeCommute(
   report: (text: string) => void,
   /** 这几天之外已经用过的 poiId（例如前几天已落库的），换点时要一并避开 */
   excludedPoiIds: Set<string> = new Set(),
+  /** 用户在额外需求里勾选的天型黑名单，换点时也要尊重 */
+  ban: DayTypeBan = {},
 ): Promise<string[]> {
   const warnings: string[] = []
   const usedPoiIds = new Set<string>(excludedPoiIds)
@@ -786,15 +959,22 @@ export async function optimizeCommute(
       if (total > 0) report(`正在核对通勤路线（${checked}/${total}）`)
 
       const minutes = await commuteMinutes(
-        asPoi(previous),
-        asPoi(current),
+        asPoi(previous, registry),
+        asPoi(current, registry),
       )
       current.commuteMinutes = minutes
 
       if (minutes === null || minutes <= MAX_COMMUTE_MINUTES) continue
 
       // 超时了，看看能不能换个更近的地点
-      const replacement = pickReplacement(asPoi(previous), asPoi(current), registry, usedPoiIds)
+      const replacement = pickReplacement(
+        asPoi(previous, registry),
+        asPoi(current, registry),
+        registry,
+        usedPoiIds,
+        current.slot,
+        ban,
+      )
       if (!replacement) {
         warnings.push(
           `第 ${day.dayIndex} 天「${previous.name}」到「${current.name}」需要约 ${minutes} 分钟，` +
@@ -803,7 +983,7 @@ export async function optimizeCommute(
         continue
       }
 
-      const replacementMinutes = await commuteMinutes(asPoi(previous), replacement)
+      const replacementMinutes = await commuteMinutes(asPoi(previous, registry), replacement)
       if (replacementMinutes !== null && replacementMinutes > MAX_COMMUTE_MINUTES) {
         warnings.push(
           `第 ${day.dayIndex} 天「${previous.name}」到「${current.name}」需要约 ${minutes} 分钟，` +
@@ -831,22 +1011,34 @@ export async function optimizeCommute(
   return warnings
 }
 
-/** 把已落库的条目反向还原成 POI 需要的形状（换点时要用坐标） */
-function asPoi(item: PlannedItem): Poi {
+/**
+ * 把已落库的条目反向还原成 POI 形状。
+ *
+ * 优先从登记表里取原对象：登记表里存的是高德返回的完整 POI，
+ * 评分、类型、分类编码都在。早先的实现在这里把 rating、type、typecode
+ * 全填成空值，导致换点逻辑根本拿不到评分和类型——只能按直线距离瞎挑，
+ * 挑出 3 分小店的概率不低。现在改成优先查表，查不到才退化成最小形状。
+ */
+function asPoi(item: PlannedItem, registry?: Map<string, Poi>): Poi {
+  const fromRegistry = registry?.get(item.poiId)
+  if (fromRegistry) return fromRegistry
+
   return {
     poiId: item.poiId,
     name: item.name,
     lng: item.lng,
     lat: item.lat,
     address: item.address,
-    type: '',
-    typecode: '',
+    // 用 typecode 反推类型：05 开头是餐饮。这条兜底路径拿不到完整信息，
+    // 但至少比原来全填空值强——至少 isRestaurant 还能判对
+    type: item.typecode.startsWith('05') ? '餐饮服务' : '',
+    typecode: item.typecode,
     cityName: '',
     district: '',
     adcode: '',
-    rating: null,
-    cost: null,
-    tag: '',
+    rating: item.rating === null ? null : Number(item.rating),
+    cost: item.cost === null ? null : Number(item.cost),
+    tag: item.tag,
     keytag: '',
     openTimeToday: item.openTimeText,
     openTimeWeek: '',
@@ -856,20 +1048,36 @@ function asPoi(item: PlannedItem): Poi {
   }
 }
 
-/** 挑一个替代地点：未使用过的游览类 POI 里，离上一个点最近的 */
+/**
+ * 挑一个替代地点：未使用过的游览类 POI 里，离上一个点最近的。
+ *
+ * 现在多了两道必要的筛子——不过滤的话，换点的结果可能比原来更糟：
+ *   - 评分低于下限的不挑（否则会用一个 3.2 分的小店换掉 4.5 分的景点）
+ *   - 当前时段已经关门的不挑（否则会挑到一个去了就关门的地方）
+ */
 function pickReplacement(
   previous: Poi,
   current: Poi,
   registry: Map<string, Poi>,
   usedPoiIds: Set<string>,
+  slot: string,
+  ban: DayTypeBan = {},
 ): Poi | null {
   const currentDistance = straightLineDistance(previous, current)
+  // 只替换同类型：餐厅换餐厅、景点换景点
+  const wantRestaurant = isRestaurant(current)
   let best: Poi | null = null
   let bestDistance = currentDistance
 
   for (const poi of registry.values()) {
     if (usedPoiIds.has(poi.poiId)) continue
-    if (isRestaurant(poi)) continue
+    if (isRestaurant(poi) !== wantRestaurant) continue
+    // 评分不达标的直接跳过，不要把更差的地方换进来
+    if (isRatingReject(poi, wantRestaurant)) continue
+    // 营业时间与当前时段冲突的跳过
+    if (checkSlotHours(poi, slot, wantRestaurant).verdict === 'closed') continue
+    // 用户勾了不爬山，就不要用爬山地点当替代
+    if (ban.noHike && matchesHikeKeyword(poi)) continue
 
     const distance = straightLineDistance(previous, poi)
     if (distance < bestDistance) {
@@ -879,4 +1087,10 @@ function pickReplacement(
   }
 
   return best
+}
+
+/** 兜底用的高强度地点判断。避免 scheduler 直接依赖 spot-rules 的私有表 */
+function matchesHikeKeyword(poi: Poi): boolean {
+  const text = `${poi.name} ${poi.tag} ${poi.keytag} ${poi.type}`
+  return /登山|徒步|索道|爬山|栈道|山顶|峡谷/.test(text)
 }

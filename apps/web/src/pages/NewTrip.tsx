@@ -32,6 +32,8 @@ import {
   Steps,
   Tag,
   Typography,
+  theme as antdTheme,
+  type GlobalToken,
 } from 'antd'
 import dayjs, { type Dayjs } from 'dayjs'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -53,7 +55,22 @@ import AmapMap, { type MapMarker } from '../components/AmapMap'
 const PREFERENCE_OPTIONS = ['美食', '自然风光', '历史人文', '亲子', '摄影', '户外徒步', '购物', '夜生活', '地标打卡', '夜市小吃']
 
 /** 额外需求选项。同样支持自定义输入 */
-const EXTRA_NEED_OPTIONS = ['带老人', '带小孩', '无障碍', '素食', '宠物友好', '避开人流', '自驾']
+const EXTRA_NEED_OPTIONS = [
+  '带老人',
+  '带小孩',
+  '无障碍',
+  '素食',
+  '宠物友好',
+  '避开人流',
+  '自驾',
+  // 以下四项是行程体裁的开关。文案要写成模型和规则都能识别的说法，
+  // 后端的 parseDayTypeBan 靠关键词判断（「不」+「爬山/主题乐园/夜爬」）。
+  // 用户如果自己手打同义句（例如「这次别安排爬山」）也能被识别。
+  '不含爬山等高强度行程',
+  '不含主题乐园整天行程',
+  '不安排夜爬看日出',
+  '行程节奏轻松一些',
+]
 
 /** antd 的下拉框要求选项是 { label, value } 结构，这里统一转换一次 */
 const toSelectOptions = (values: string[]) => values.map((value) => ({ label: value, value }))
@@ -61,20 +78,64 @@ const toSelectOptions = (values: string[]) => values.map((value) => ({ label: va
 // 列表容器样式。用原生 div 而不是 antd 的 List 组件：
 // antd 6.6 已把 List 标记为废弃（官方建议改用虚拟列表 Listy），
 // 而我们这里的条目数很少，自己写结构更简单、也不承担组件废弃的风险。
-const listBoxStyle: React.CSSProperties = {
-  border: '1px solid #f0f0f0',
-  borderRadius: 8,
+//
+// 注意这两种样式现在是**函数**：颜色必须取自当前主题的 token，
+// 早先写成模块级常量会把浅色定死，黑夜模式下就是一块亮框。
+const listBoxStyle = (token: GlobalToken): React.CSSProperties => ({
+  border: `1px solid ${token.colorBorderSecondary}`,
+  borderRadius: token.borderRadius,
   maxHeight: 396,
   overflowY: 'auto',
-}
+  background: token.colorFillQuaternary,
+})
 
-const listHintStyle: React.CSSProperties = {
+const listHintStyle = (token: GlobalToken): React.CSSProperties => ({
   padding: 24,
   textAlign: 'center',
-  color: '#999',
-}
+  color: token.colorTextTertiary,
+})
 
 const MAX_DAYS = 15
+
+/**
+ * 行程概览里的一格信息。
+ *
+ * 为什么不用 Descriptions：带边框的 Descriptions 是一张表格，
+ * 在旅游产品里显得像后台报表。这里改成「字段名在上、内容在下」的小块，
+ * 底色用主题的淡填充，视觉上和整页的卡片语言更一致。
+ */
+function InfoBlock({
+  label,
+  children,
+  token,
+  span = 1,
+}: {
+  label: string
+  children: React.ReactNode
+  token: GlobalToken
+  /** 占几列。跨列用在「偏好」「额外需求」这种内容可能很长的字段上 */
+  span?: number
+}) {
+  return (
+    <div
+      data-testid="info-block"
+      style={{
+        gridColumn: span > 1 ? `span ${span}` : undefined,
+        padding: '10px 12px',
+        borderRadius: token.borderRadius,
+        background: token.colorFillQuaternary,
+        border: `1px solid ${token.colorBorderSecondary}`,
+      }}
+    >
+      <div style={{ marginBottom: 4 }}>
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          {label}
+        </Typography.Text>
+      </div>
+      {children}
+    </div>
+  )
+}
 
 interface StepOneForm {
   title?: string
@@ -93,6 +154,7 @@ type StayMode = 'manual' | 'undecided'
 
 export default function NewTrip() {
   const { message } = App.useApp()
+  const { token } = antdTheme.useToken()
   const navigate = useNavigate()
   const [form] = Form.useForm<StepOneForm>()
 
@@ -565,16 +627,16 @@ export default function NewTrip() {
                     />
                   )}
 
-                  <div style={listBoxStyle}>
+                  <div style={listBoxStyle(token)}>
                     {hotelsLoading && (
-                      <div style={listHintStyle}>
+                      <div style={listHintStyle(token)}>
                         <Spin size="small" />
                         <span style={{ marginLeft: 8 }}>正在搜索…</span>
                       </div>
                     )}
 
                     {!hotelsLoading && hotels.length === 0 && (
-                      <div style={listHintStyle}>
+                      <div style={listHintStyle(token)}>
                         还没有搜索结果，试着搜索「酒店」或具体名称
                       </div>
                     )}
@@ -590,8 +652,10 @@ export default function NewTrip() {
                             style={{
                               padding: '10px 12px',
                               cursor: 'pointer',
-                              borderBottom: '1px solid #f5f5f5',
-                              background: active ? '#e6f4ff' : undefined,
+                              borderRadius: token.borderRadius,
+                              // 选中项用主色淡底 + 主色描边，比整行刷蓝更克制，也更适配双主题
+                              border: `1px solid ${active ? token.colorPrimaryBorder : 'transparent'}`,
+                              background: active ? token.colorPrimaryBg : undefined,
                             }}
                           >
                             <Space size={6} wrap>
@@ -690,8 +754,13 @@ export default function NewTrip() {
               description={
                 <span>
                   AI 会通过高德查询你目的地的景点、餐厅、天气与真实路线，再按这些规则排布：以住宿为锚点、
-                  每天游览类地点不超过 3 个、餐厅插在相邻两个景点之间、相邻两点实际通勤超过 40 分钟就换点、
-                  有雨时优先室内场所。
+                  每天游览类地点不超过 3 个（主题乐园整天、爬山这类行程只排 1 个）、餐厅插在相邻两个景点之间、
+                  相邻两点实际通勤超过 40 分钟就换点、有雨时优先室内场所。
+                  <br />
+                  <b>选点标准</b>：景点评分不低于 4 分，且营业时间要和安排的时段对得上
+                  （不会把 17:00 就关门的地方排到晚上）。如果某天体力消耗特别大，
+                  次日会自动排得轻松一些。生成后对某个地点不满意，可以在行程里点「换一个」，
+                  在可行距离内替换同类地点。
                   <br />
                   <b>按天生成</b>：每次只排一天，排完立刻存下来，进度会在这里推进。
                   某一天失败也不必从头再来，已经排好的天都会保留。期间可以离开本页，生成在服务端继续。
@@ -772,9 +841,24 @@ export default function NewTrip() {
             />
           )}
 
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="行程编号">{savedTripId ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="状态">
+          {/* 行程概览。早先用的是 Descriptions 带边框表格，视觉上像一张数据报表，
+              和旅游产品的气质不搭。改成「两列信息网格 + 胶囊标签」：
+              每条信息是一个独立小块，字段名在上、内容在下，扫起来更轻松 */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: 10,
+              marginBottom: 16,
+            }}
+          >
+            <InfoBlock label="行程编号" token={token}>
+              <Typography.Text style={{ fontSize: 13 }} copyable={Boolean(savedTripId)}>
+                {savedTripId ?? '-'}
+              </Typography.Text>
+            </InfoBlock>
+
+            <InfoBlock label="状态" token={token}>
               {genStatus === 'ready' ? (
                 <Tag color="green">已生成</Tag>
               ) : genStatus === 'generating' ? (
@@ -784,60 +868,143 @@ export default function NewTrip() {
               ) : (
                 <Tag>草稿</Tag>
               )}
-            </Descriptions.Item>
-            <Descriptions.Item label="目的地">
-              {resolvedCity?.city}（{resolvedCity?.adcode}）
-            </Descriptions.Item>
-            <Descriptions.Item label="出发日期">
-              {stepOne.startDate.format('YYYY-MM-DD')}
-            </Descriptions.Item>
-            <Descriptions.Item label="天数 / 人数">
-              {stepOne.days} 天 · {stepOne.travelers} 人
-            </Descriptions.Item>
-            <Descriptions.Item label="预算">
-              {stepOne.budgetAmount
-                ? `¥${stepOne.budgetAmount}（${stepOne.budgetScope === 'per_person' ? '人均' : '总预算'}）`
-                : '不限'}
-            </Descriptions.Item>
-            <Descriptions.Item label="住宿锚点" span={2}>
-              {stayMode === 'manual' && selectedHotel
-                ? `${selectedHotel.name}（${selectedHotel.lng}, ${selectedHotel.lat}）`
-                : '未确定，将由 AI 推荐交通便利的中心区域'}
-            </Descriptions.Item>
-            <Descriptions.Item label="偏好" span={2}>
-              {stepOne.preferences?.length ? stepOne.preferences.join('、') : '未指定'}
-            </Descriptions.Item>
-            <Descriptions.Item label="额外需求" span={2}>
-              {stepOne.extraNeeds?.length ? stepOne.extraNeeds.join('、') : '未指定'}
-            </Descriptions.Item>
-          </Descriptions>
+            </InfoBlock>
+
+            <InfoBlock label="目的地" token={token}>
+              <Typography.Text style={{ fontSize: 13 }}>
+                {resolvedCity?.city}
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 6 }}>
+                {resolvedCity?.adcode}
+              </Typography.Text>
+            </InfoBlock>
+
+            <InfoBlock label="出发日期" token={token}>
+              <Typography.Text style={{ fontSize: 13 }}>
+                {stepOne.startDate.format('YYYY-MM-DD')}
+              </Typography.Text>
+            </InfoBlock>
+
+            <InfoBlock label="天数 / 人数" token={token}>
+              <Space size={4}>
+                <Tag color="blue">{stepOne.days} 天</Tag>
+                <Tag color="cyan">{stepOne.travelers} 人</Tag>
+              </Space>
+            </InfoBlock>
+
+            <InfoBlock label="预算" token={token}>
+              <Typography.Text style={{ fontSize: 13 }}>
+                {stepOne.budgetAmount
+                  ? `¥${stepOne.budgetAmount} · ${stepOne.budgetScope === 'per_person' ? '人均' : '总预算'}`
+                  : '不限'}
+              </Typography.Text>
+            </InfoBlock>
+
+            <InfoBlock label="住宿锚点" token={token} span={2}>
+              <Typography.Text style={{ fontSize: 13 }}>
+                {stayMode === 'manual' && selectedHotel
+                  ? selectedHotel.name
+                  : '未确定，将由 AI 推荐交通便利的中心区域'}
+              </Typography.Text>
+            </InfoBlock>
+
+            <InfoBlock label="偏好" token={token} span={2}>
+              {stepOne.preferences?.length ? (
+                <Space size={4} wrap>
+                  {stepOne.preferences.map((item) => (
+                    <Tag key={item} color="purple">
+                      {item}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                  未指定
+                </Typography.Text>
+              )}
+            </InfoBlock>
+
+            <InfoBlock label="额外需求" token={token} span={2}>
+              {stepOne.extraNeeds?.length ? (
+                <Space size={4} wrap>
+                  {stepOne.extraNeeds.map((item) => (
+                    <Tag key={item} color="gold">
+                      {item}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                  未指定
+                </Typography.Text>
+              )}
+            </InfoBlock>
+          </div>
 
           <Divider titlePlacement="start" plain>
             行程期间天气
           </Divider>
-          <div style={{ ...listBoxStyle, maxHeight: 'none' }}>
+
+          {/* 天气改成横向卡片：一天一张，有预报的用主色淡底，
+              超窗的用虚线框，视觉上明确区分「有数据」与「超出范围」，
+              不再是一行行灰字排下来 */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))',
+              gap: 8,
+            }}
+          >
             {tripDates.map((date, index) => {
               const cast = weatherByDate.get(date)
               return (
                 <div
                   key={date}
                   data-testid="weather-item"
-                  style={{ padding: '8px 12px', borderBottom: '1px solid #f5f5f5' }}
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: token.borderRadius,
+                    border: cast
+                      ? `1px solid ${token.colorPrimaryBorder}`
+                      : `1px dashed ${token.colorBorderSecondary}`,
+                    background: cast ? token.colorPrimaryBg : token.colorFillQuaternary,
+                  }}
                 >
-                  <Space wrap>
-                    <Tag color="geekblue">第 {index + 1} 天</Tag>
-                    <span>{date}</span>
-                    {cast ? (
-                      <Typography.Text>
-                        {cast.dayWeather} {cast.dayTemp}°C / 夜间 {cast.nightWeather}{' '}
-                        {cast.nightTemp}°C · {cast.dayWind}风 {cast.dayPower}级
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: 4,
+                    }}
+                  >
+                    <Typography.Text strong style={{ fontSize: 12 }}>
+                      第 {index + 1} 天
+                    </Typography.Text>
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      {date.slice(5)}
+                    </Typography.Text>
+                  </div>
+
+                  {cast ? (
+                    <>
+                      <div>
+                        <Typography.Text style={{ fontSize: 13 }}>
+                          {cast.dayWeather} {cast.dayTemp}°C
+                        </Typography.Text>
+                      </div>
+                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                        夜间 {cast.nightWeather} {cast.nightTemp}°C · {cast.dayWind}风{' '}
+                        {cast.dayPower}级
                       </Typography.Text>
-                    ) : (
-                      <Typography.Text type="secondary">
-                        超出预报范围（高德天气预报仅覆盖未来约 4 天）
-                      </Typography.Text>
-                    )}
-                  </Space>
+                    </>
+                  ) : (
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                      超出预报范围
+                      <br />
+                      （高德仅覆盖未来约 4 天）
+                    </Typography.Text>
+                  )}
                 </div>
               )
             })}

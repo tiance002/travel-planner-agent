@@ -39,6 +39,7 @@ import {
   type PlannedDay,
   type RawPlan,
 } from './scheduler'
+import { parseDayTypeBan, type DayType, type Intensity } from './spot-rules'
 import { runTool, TOOL_DEFINITIONS, type ToolContext } from './tools'
 
 /** 单天生成的硬超时。一天排不出来就失败，不拖着整趟任务 */
@@ -297,9 +298,31 @@ export async function generateTrip(
     }
   }
 
+  // 用户的额外需求里可能勾了「不含爬山」「不含主题乐园整天」这类开关，
+  // 它们在排程阶段作为硬性黑名单执行
+  const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
+
   const doneDays = new Set(existing.map((day) => day.dayIndex))
   let startDay = 1
   while (doneDays.has(startDay)) startDay += 1
+
+  /**
+   * 上一天的天型与强度。跨天影响全靠这两个值传递：
+   * 昨天夜爬或爬了一整天山，今天校验时会自动降档成恢复日。
+   *
+   * 断点续跑时要能从已落库的最后一天恢复——否则「重新生成第 5 天」
+   * 就丢掉了「第 4 天是夜爬」这个信息，第 5 天会排得过于激进。
+   * 只有当最后一天正好是 startDay 的前一天时才算数：中间有缺口说明
+   * 前一天还没排，此时没有可以传导的状态。
+   */
+  const lastExisting = existing.length > 0 ? existing[existing.length - 1] : null
+  let previousDayState: { dayType: DayType; intensity: Intensity } | null = null
+  if (lastExisting && lastExisting.dayIndex === startDay - 1) {
+    previousDayState = {
+      dayType: (lastExisting.dayType as DayType) || 'normal',
+      intensity: (lastExisting.intensity as Intensity) || 'medium',
+    }
+  }
 
   if (startDay > trip.days) {
     log('所有天都已经排好，无需再生成')
@@ -349,6 +372,8 @@ export async function generateTrip(
         stay: { poiId: anchor.poi.poiId, name: anchor.poi.name },
         // 只带最近 20 个地名就够模型避开重复了，带太多反而稀释注意力
         previousPlaces: previousPlaces.slice(-20),
+        // 跨天影响：昨天的天型与强度决定今天该快还是该慢
+        previousDayState,
       }),
       tools: TOOL_DEFINITIONS,
       executeTool: (name, args) => runTool(name, args, toolContext),
@@ -374,7 +399,11 @@ export async function generateTrip(
       log,
     })
 
-    const { day, warnings } = validateDay(raw, registry, dayIndex, { usedPoiIds })
+    const { day, warnings } = validateDay(raw, registry, dayIndex, {
+      usedPoiIds,
+      ban,
+      previousDayState,
+    })
     for (const warning of warnings) log(`规则修正：${warning}`)
 
     // 住宿地本身不是游览点，它是一天的起点与终点，不该出现在条目里
@@ -391,7 +420,7 @@ export async function generateTrip(
     }
 
     // 通勤体检只做这一天：问题当天暴露，且换点时避开前面几天已用的地点
-    const commuteWarnings = await optimizeCommute([day], registry, report, usedPoiIds)
+    const commuteWarnings = await optimizeCommute([day], registry, report, usedPoiIds, ban)
     for (const warning of commuteWarnings) log(`通勤体检：${warning}`)
 
     await persistDay(tripId, day, date, cast)
@@ -400,6 +429,12 @@ export async function generateTrip(
       usedPoiIds.add(item.poiId)
       previousPlaces.push(item.name)
     }
+
+    // 把这一天的天型与强度记下来，作为下一天的输入。
+    // 这就是「夜爬会影响第二天」的传导机制本身——不需要更复杂的机制，
+    // 让强度从第 N 天流向第 N+1 天就够了。
+    previousDayState = { dayType: day.dayType, intensity: day.intensity }
+    log(`第 ${dayIndex} 天体裁：${day.dayType}（强度 ${day.intensity}）`)
 
     // 这一天的进度必须落库，用户才能看到天与天之间的推进
     await prisma.trip.update({
@@ -515,6 +550,8 @@ async function persistDay(
       date,
       summary: day.summary || null,
       weather: weather ? JSON.stringify(weather) : null,
+      dayType: day.dayType,
+      intensity: day.intensity,
       items: {
         create: day.items.map((item) => ({
           orderIndex: item.orderIndex,
@@ -529,6 +566,7 @@ async function persistDay(
           rating: item.rating,
           cost: item.cost,
           tag: item.tag || null,
+          typecode: item.typecode || null,
           openTimeText: item.openTimeText || null,
           note: item.note || null,
           photos: item.photos.length > 0 ? JSON.stringify(item.photos) : null,
