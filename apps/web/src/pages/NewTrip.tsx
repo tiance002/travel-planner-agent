@@ -4,7 +4,8 @@
 //   1. 基本信息：目的地（需解析成行政区划编码）、出发日期、天数、人数、偏好、预算、额外需求
 //   2. 选定住宿：在页面内嵌的高德地图上搜索并点选酒店，作为每日行程的锚点；
 //      也可以选「还没定」，此时交给 AI 推荐交通便利的中心区域
-//   3. 生成行程：触发 AI 排布每日景点与餐厅，页面轮询显示进度
+//   3. 生成行程：按天触发 AI 排布景点与餐厅，页面轮询显示逐天进度；
+//      某一天失败不影响已经排好的天，可以从断点继续
 //   4. 查看结果：时间轴与地图联动、到点打卡（下一阶段开放）
 //
 // 为什么一定要先解析目的地：高德做 POI 检索和天气查询用的都是 6 位行政区划编码（adcode），
@@ -22,6 +23,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Progress,
   Radio,
   Row,
   Select,
@@ -115,6 +117,8 @@ export default function NewTrip() {
   const [genStatus, setGenStatus] = useState<'draft' | 'generating' | 'ready' | 'failed'>('draft')
   const [genProgress, setGenProgress] = useState('')
   const [genError, setGenError] = useState('')
+  /** 已完成到第几天。服务端按天生成，这个数字让进度看得见 */
+  const [genDayIndex, setGenDayIndex] = useState<number | null>(null)
   const pollTimer = useRef<number | null>(null)
 
   // 用户改了城市名，之前解析的结果就作废了，必须重新解析
@@ -260,13 +264,19 @@ export default function NewTrip() {
   async function pollGeneration(tripId: string) {
     try {
       const { data } = await api.get<{
-        trip: { status: string; genProgress: string | null; genError: string | null }
+        trip: {
+          status: string
+          genProgress: string | null
+          genError: string | null
+          genDayIndex: number | null
+        }
       }>(`/trips/${tripId}`)
 
       const trip = data.trip
       setGenStatus(trip.status as 'draft' | 'generating' | 'ready' | 'failed')
       setGenProgress(trip.genProgress ?? '')
       setGenError(trip.genError ?? '')
+      setGenDayIndex(trip.genDayIndex ?? null)
 
       if (trip.status === 'generating') {
         pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
@@ -279,16 +289,24 @@ export default function NewTrip() {
     }
   }
 
-  async function startGenerate() {
+  /**
+   * 触发生成。
+   *
+   * mode 有两种：continue 保留已经排好的天，从第一个空缺的天接着排；
+   * restart 清空已有安排从第 1 天重来。服务端是按天生成的，
+   * 所以中途失败时用户可以先「继续」，不必把已经排好的几天一起废掉。
+   */
+  async function startGenerate(mode: 'continue' | 'restart') {
     if (!savedTripId) return
 
     setGenerating(true)
     setGenError('')
-    setGenProgress('正在准备')
+    setGenProgress(mode === 'restart' ? '正在准备（重新生成）' : '正在准备')
     setGenStatus('generating')
+    if (mode === 'restart') setGenDayIndex(null)
 
     try {
-      await api.post(`/trips/${savedTripId}/generate`)
+      await api.post(`/trips/${savedTripId}/generate`, { mode })
       void pollGeneration(savedTripId)
     } catch (err) {
       setGenError(extractError(err, '触发失败，请稍后重试'))
@@ -335,6 +353,12 @@ export default function NewTrip() {
     () => new Map((weather?.casts ?? []).map((cast) => [cast.date, cast])),
     [weather],
   )
+
+  // 逐天生成的进度。服务端把「已完成到第几天」写在 genDayIndex 上
+  const totalDays = stepOne?.days ?? 0
+  const doneDays = genDayIndex ?? 0
+  // 失败但已经排好了部分天数：这时值得给一个「继续」而不是逼着他从头重来
+  const canContinue = genStatus === 'failed' && doneDays > 0 && doneDays < totalDays
 
   return (
     <div style={{ maxWidth: 1080, margin: '0 auto' }}>
@@ -656,39 +680,66 @@ export default function NewTrip() {
               title="点击下方按钮开始排程"
               description={
                 <span>
-                  AI 会先通过高德查询你目的地的景点、餐厅与天气，再按这些规则排布：以住宿为锚点、
+                  AI 会通过高德查询你目的地的景点、餐厅、天气与真实路线，再按这些规则排布：以住宿为锚点、
                   每天游览类地点不超过 3 个、餐厅插在相邻两个景点之间、相邻两点实际通勤超过 40 分钟就换点、
                   有雨时优先室内场所。
                   <br />
-                  整个过程大约二十秒到一分钟。期间可以离开本页，生成会在服务端继续。
+                  <b>按天生成</b>：每次只排一天，排完立刻存下来，进度会在这里推进。
+                  某一天失败也不必从头再来，已经排好的天都会保留。期间可以离开本页，生成在服务端继续。
                 </span>
               }
             />
           )}
 
           <Space style={{ marginBottom: 16 }} wrap>
+            {canContinue && (
+              <Button
+                type="primary"
+                data-testid="generate-continue-btn"
+                loading={generating}
+                onClick={() => void startGenerate('continue')}
+              >
+                继续生成第 {doneDays + 1} 天
+              </Button>
+            )}
             <Button
-              type="primary"
+              type={canContinue ? 'default' : 'primary'}
               data-testid="generate-btn"
               loading={generating}
-              onClick={startGenerate}
+              onClick={() =>
+                void startGenerate(genStatus === 'ready' || doneDays > 0 ? 'restart' : 'continue')
+              }
             >
-              {genStatus === 'ready' ? '重新生成' : '开始生成行程'}
+              {genStatus === 'ready' ? '重新生成' : doneDays > 0 ? '从头重新生成' : '开始生成行程'}
             </Button>
             {generating && (
               <Typography.Text type="secondary">生成在服务端进行，请勿关闭当前账号的会话</Typography.Text>
             )}
           </Space>
 
-          {genStatus === 'generating' && (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-              data-testid="gen-progress"
-              title={`AI 正在排程：${genProgress || '准备中'}`}
-              description="正在反复调用高德接口查询景点、餐厅与真实路线，请稍候。"
-            />
+          {(genStatus === 'generating' || doneDays > 0) && (
+            <div data-testid="gen-progress" style={{ marginBottom: 16 }}>
+              <Alert
+                type={genStatus === 'generating' ? 'info' : 'warning'}
+                showIcon
+                title={
+                  genStatus === 'generating'
+                    ? `AI 正在排程：${genProgress || '准备中'}`
+                    : `已排好 ${doneDays}/${totalDays} 天`
+                }
+                description={
+                  genStatus === 'generating'
+                    ? '正在调用高德接口查询景点、餐厅与真实路线，每排完一天就会立刻存下来。'
+                    : '上面这些天已经保存在行程里了，可以接着把剩下的排完。'
+                }
+              />
+              <Progress
+                percent={totalDays > 0 ? Math.round((doneDays / totalDays) * 100) : 0}
+                size="small"
+                format={() => `${doneDays}/${totalDays} 天`}
+                style={{ marginTop: 8 }}
+              />
+            </div>
           )}
 
           {genError && (
@@ -698,7 +749,17 @@ export default function NewTrip() {
               style={{ marginBottom: 16 }}
               data-testid="gen-error"
               title="生成失败"
-              description={genError}
+              description={
+                <span>
+                  {genError}
+                  {doneDays > 0 && (
+                    <>
+                      <br />
+                      已经排好的 {doneDays} 天不受影响，点「继续生成第 {doneDays + 1} 天」就能接着来。
+                    </>
+                  )}
+                </span>
+              }
             />
           )}
 

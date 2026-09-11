@@ -6,10 +6,13 @@
 //   这些都由这一层拦住并修正，而不是返回给用户一份「看起来没错」的行程。
 //
 // 本文件负责四件事：
-//   1. 把模型输出的文本解析成结构（容错处理 Markdown 代码块等包裹）
+//   1. 把模型输出的文本解析成结构（容错处理 Markdown 代码块、多余引号、截断等各种失手）
 //   2. 校验每个地点的 poiId 确实来自工具返回，坐标一律以服务端登记表为准
-//   3. 修正每天的顺序与数量：景点 ≤ 3，餐厅夹在景点之间
+//   3. 修正一天之内的顺序与数量：景点 ≤ 3，餐厅夹在景点之间；跨天去重
 //   4. 体检真实通勤时间，超过 40 分钟的相邻点尝试替换
+//
+// 粒度是「一天」而不是「整趟行程」：生成本身就是一天一次请求，
+// 校验跟着对齐，某一天排坏了能立刻发现，不必等所有天都跑完。
 
 import { planRoute, straightLineDistance, type Poi } from '../amap'
 
@@ -44,11 +47,17 @@ export interface PlannedDay {
   items: PlannedItem[]
 }
 
-export interface PlanResult {
-  stay: { poiId: string; name: string; reason: string; lng: number; lat: number } | null
-  days: PlannedDay[]
+/** 单天校验的产出 */
+export interface DayValidation {
+  day: PlannedDay
   /** 校验过程中发现并处理过的问题，存进日志便于排查，也用于给用户提示 */
   warnings: string[]
+}
+
+/** 校验单天时的可选项 */
+export interface ValidateDayOptions {
+  /** 前几天已经用过的 poiId。跨天去重要靠它，免得第 2 天又把第 1 天的景点排一遍 */
+  usedPoiIds?: Set<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -575,123 +584,145 @@ function arrangeDay(items: { poi: Poi; note: string }[]): { poi: Poi; note: stri
 }
 
 /**
- * 校验并修正模型给出的方案。
- * 传入的登记表是唯一可信来源：模型提到但没在表里的 poiId 一律丢弃。
+ * 从模型的输出里取出「这一天」。
+ *
+ * 兼容三种写法，都是实际可能遇到的：
+ *   - 标准写法：{ summary, items }
+ *   - 多包一层：{ days: [ { summary, items } ] }（模型习惯性地按整天输出）
+ *   - 多写了 dayIndex：{ dayIndex: 2, summary, items }
+ * 只要 items 是数组就认，多出来的字段直接忽略，不为此报错——
+ * 我们的目标是拿到安排，不是跟模型的格式洁癖较劲。
  */
-export function validatePlan(raw: RawPlan, registry: Map<string, Poi>, expectedDays: number): PlanResult {
+function extractRawDay(raw: RawPlan): RawDay | null {
+  if (Array.isArray(raw.days)) {
+    const first = (raw.days as RawDay[])[0]
+    return first && typeof first === 'object' ? first : null
+  }
+
+  const self = raw as RawDay
+  return Array.isArray(self.items) ? self : null
+}
+
+/**
+ * 校验并修正模型给出的**某一天**的安排。
+ *
+ * 传入的登记表是唯一可信来源：模型提到但没在表里的 poiId 一律丢弃。
+ * 之所以按天调用而不是一次校验整趟行程，是因为现在生成本身就是一天一次，
+ * 校验粒度跟着对齐，能立刻发现「这一天排坏了」而不必等到全部跑完。
+ */
+export function validateDay(
+  raw: RawPlan,
+  registry: Map<string, Poi>,
+  dayIndex: number,
+  options: ValidateDayOptions = {},
+): DayValidation {
   const warnings: string[] = []
-  const days: PlannedDay[] = []
-
-  const rawDays = Array.isArray(raw.days) ? (raw.days as RawDay[]) : []
-  if (rawDays.length === 0) {
-    throw new Error('模型没有给出任何一天的安排')
+  const rawDay = extractRawDay(raw)
+  if (!rawDay) {
+    throw new Error('模型没有给出这一天的地点安排')
   }
 
-  const usedPoiIds = new Set<string>()
+  const rawItems = Array.isArray(rawDay.items) ? (rawDay.items as RawItem[]) : []
+  const collected: { poi: Poi; note: string }[] = []
 
-  rawDays.forEach((rawDay, dayOffset) => {
-    const dayIndex = Number(rawDay.dayIndex)
-    const safeDayIndex = Number.isInteger(dayIndex) && dayIndex > 0 ? dayIndex : dayOffset + 1
+  for (const rawItem of rawItems) {
+    const poiId = typeof rawItem.poiId === 'string' ? rawItem.poiId : ''
+    const poi = registry.get(poiId)
 
-    const rawItems = Array.isArray(rawDay.items) ? (rawDay.items as RawItem[]) : []
-    const collected: { poi: Poi; note: string }[] = []
-
-    for (const rawItem of rawItems) {
-      const poiId = typeof rawItem.poiId === 'string' ? rawItem.poiId : ''
-      const poi = registry.get(poiId)
-
-      if (!poi) {
-        // 这就是「模型编造地点」的拦截点
-        warnings.push(`第 ${safeDayIndex} 天有一个地点不在候选列表中（poiId：${poiId || '缺失'}），已丢弃`)
-        continue
-      }
-
-      // 同一天不重复安排同一个地点
-      if (collected.some((c) => c.poi.poiId === poi.poiId)) {
-        warnings.push(`第 ${safeDayIndex} 天重复安排了「${poi.name}」，已去重`)
-        continue
-      }
-
-      collected.push({
-        poi,
-        note: typeof rawItem.note === 'string' ? rawItem.note.slice(0, 200) : '',
-      })
+    if (!poi) {
+      // 这就是「模型编造地点」的拦截点
+      warnings.push(`第 ${dayIndex} 天有一个地点不在候选列表中（poiId：${poiId || '缺失'}），已丢弃`)
+      continue
     }
 
-    // 截断超量的游览地点。餐厅不计入上限，所以先按类型分开数
-    const spotCount = collected.filter((c) => !isRestaurant(c.poi)).length
-    if (spotCount > MAX_SPOTS_PER_DAY) {
-      let keptSpots = 0
-      const trimmed = collected.filter((c) => {
-        if (isRestaurant(c.poi)) return true
-        keptSpots += 1
-        return keptSpots <= MAX_SPOTS_PER_DAY
-      })
-      warnings.push(`第 ${safeDayIndex} 天原本安排了 ${spotCount} 个景点，已按规则裁剪到 ${MAX_SPOTS_PER_DAY} 个`)
-      collected.length = 0
-      collected.push(...trimmed)
+    // 同一天不重复安排同一个地点
+    if (collected.some((c) => c.poi.poiId === poi.poiId)) {
+      warnings.push(`第 ${dayIndex} 天重复安排了「${poi.name}」，已去重`)
+      continue
     }
 
-    const arranged = arrangeDay(collected)
-    if (arranged.length === 0) {
-      if (collected.length > 0) {
-        warnings.push(`第 ${safeDayIndex} 天只有餐厅、没有景点，已清空（餐厅不会单独占一天）`)
-      }
-      days.push({ dayIndex: safeDayIndex, summary: '', items: [] })
-      return
+    // 跨天去重：前几天已经去过的地方，今天不必再去
+    if (options.usedPoiIds?.has(poi.poiId)) {
+      warnings.push(`第 ${dayIndex} 天重复推荐了前面几天去过的「${poi.name}」，已丢弃`)
+      continue
     }
 
-    // 餐厅比景点还多时，多出来的那几家没有合法位置——放哪都会和另一家连排，
-    // 只能略去。这里如实说明，免得用户以为推荐里本来就没有。
-    const keptRestaurants = arranged.filter((entry) => isRestaurant(entry.poi)).length
-    const droppedRestaurants =
-      collected.filter((entry) => isRestaurant(entry.poi)).length - keptRestaurants
-    if (droppedRestaurants > 0) {
-      warnings.push(
-        `第 ${safeDayIndex} 天的餐厅数量多于景点数量，${droppedRestaurants} 家会与前后的餐厅挨在一起，已略去`,
-      )
-    }
-
-    const items = arranged.map((entry, index) =>
-      toPlannedItem(entry.poi, entry.note, entry.slot, index + 1),
-    )
-    // 记录已用地点，后面换点时要避开这些
-    for (const item of items) usedPoiIds.add(item.poiId)
-
-    days.push({
-      dayIndex: safeDayIndex,
-      summary:
-        typeof rawDay.summary === 'string' && rawDay.summary.trim()
-          ? rawDay.summary.trim().slice(0, 120)
-          : '',
-      items,
+    collected.push({
+      poi,
+      note: typeof rawItem.note === 'string' ? rawItem.note.slice(0, 200) : '',
     })
-  })
-
-  // 补齐模型漏掉的天数：宁可空着，也不要让它把第 5 天复制成第 4 天
-  for (let index = 1; index <= expectedDays; index++) {
-    if (!days.some((d) => d.dayIndex === index)) {
-      warnings.push(`模型漏掉了第 ${index} 天，已留空`)
-      days.push({ dayIndex: index, summary: '', items: [] })
-    }
   }
-  days.sort((a, b) => a.dayIndex - b.dayIndex)
 
-  // 住宿锚点同样必须来自登记表
-  let stay: PlanResult['stay'] = null
+  // 这时 collected 里已经全是「可信且未重复」的地点，记进已用集合，
+  // 后续换点时就能避开今天剩余的位置
+  for (const entry of collected) options.usedPoiIds?.add(entry.poi.poiId)
+
+  // 截断超量的游览地点。餐厅不计入上限，所以先按类型分开数
+  const spotCount = collected.filter((c) => !isRestaurant(c.poi)).length
+  if (spotCount > MAX_SPOTS_PER_DAY) {
+    let keptSpots = 0
+    const trimmed = collected.filter((c) => {
+      if (isRestaurant(c.poi)) return true
+      keptSpots += 1
+      return keptSpots <= MAX_SPOTS_PER_DAY
+    })
+    warnings.push(`第 ${dayIndex} 天原本安排了 ${spotCount} 个景点，已按规则裁剪到 ${MAX_SPOTS_PER_DAY} 个`)
+    collected.length = 0
+    collected.push(...trimmed)
+  }
+
+  const summary =
+    typeof rawDay.summary === 'string' && rawDay.summary.trim()
+      ? rawDay.summary.trim().slice(0, 120)
+      : ''
+
+  const arranged = arrangeDay(collected)
+  if (arranged.length === 0) {
+    if (collected.length > 0) {
+      warnings.push(`第 ${dayIndex} 天只有餐厅、没有景点，已清空（餐厅不会单独占一天）`)
+    }
+    return { day: { dayIndex, summary, items: [] }, warnings }
+  }
+
+  // 餐厅比景点还多时，多出来的那几家没有合法位置——放哪都会和另一家连排，
+  // 只能略去。这里如实说明，免得用户以为推荐里本来就没有。
+  const keptRestaurants = arranged.filter((entry) => isRestaurant(entry.poi)).length
+  const droppedRestaurants =
+    collected.filter((entry) => isRestaurant(entry.poi)).length - keptRestaurants
+  if (droppedRestaurants > 0) {
+    warnings.push(
+      `第 ${dayIndex} 天的餐厅数量多于景点数量，${droppedRestaurants} 家会与前后的餐厅挨在一起，已略去`,
+    )
+  }
+
+  const items = arranged.map((entry, index) =>
+    toPlannedItem(entry.poi, entry.note, entry.slot, index + 1),
+  )
+
+  // 记进已用集合，供跨天去重与换点使用。
+  // 只记最终留下的：被裁掉的候选（例如第 4 个景点）不算「去过」，
+  // 后面几天若想用它当替代，仍然允许。
+  for (const item of items) options.usedPoiIds?.add(item.poiId)
+
+  return { day: { dayIndex, summary, items }, warnings }
+}
+
+/**
+ * 从模型的输出里取出住宿锚点，并核对它确实来自登记表。
+ * 核对不过返回 null，由调用方给出可读的失败原因。
+ */
+export function resolveAnchorFromRaw(
+  raw: RawPlan,
+  registry: Map<string, Poi>,
+): { poi: Poi; reason: string } | null {
   const stayPoiId = typeof raw.stay?.poiId === 'string' ? raw.stay.poiId : ''
-  const stayPoi = registry.get(stayPoiId)
-  if (stayPoi) {
-    stay = {
-      poiId: stayPoi.poiId,
-      name: stayPoi.name,
-      lng: stayPoi.lng,
-      lat: stayPoi.lat,
-      reason: typeof raw.stay?.reason === 'string' ? raw.stay.reason.slice(0, 200) : '',
-    }
-  }
+  const poi = registry.get(stayPoiId)
+  if (!poi) return null
 
-  return { stay, days, warnings }
+  return {
+    poi,
+    reason: typeof raw.stay?.reason === 'string' ? raw.stay.reason.slice(0, 200) : '',
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,30 +747,39 @@ async function commuteMinutes(from: Poi, to: Poi): Promise<number | null> {
 }
 
 /**
- * 通勤体检：把每天相邻两点之间的真实车程算出来，超过阈值的换点。
+ * 通勤体检：把相邻两点之间的真实车程算出来，超过阈值的换点。
+ *
+ * 传入的 days 通常只有一天——逐天生成时，每排完一天就单独体检一次，
+ * 这样问题能在当天暴露，而不是等整趟行程都排完。
  *
  * 换点策略：从候选池里找一个比原地点离「上一个点」更近的替代者。
  * 不做全局最优搜索——那会把运行时间拉长到用户等不起，够用就好。
+ *
+ * 返回这一批天里产生的提示信息（原先是写进 plan.warnings，现在由调用方决定怎么用）。
  */
 export async function optimizeCommute(
-  plan: PlanResult,
+  days: PlannedDay[],
   registry: Map<string, Poi>,
   report: (text: string) => void,
-): Promise<void> {
-  const usedPoiIds = new Set<string>()
-  for (const day of plan.days) {
+  /** 这几天之外已经用过的 poiId（例如前几天已落库的），换点时要一并避开 */
+  excludedPoiIds: Set<string> = new Set(),
+): Promise<string[]> {
+  const warnings: string[] = []
+  const usedPoiIds = new Set<string>(excludedPoiIds)
+  for (const day of days) {
     for (const item of day.items) usedPoiIds.add(item.poiId)
   }
 
-  const total = plan.days.reduce((sum, day) => Math.max(sum, day.items.length), 0)
+  // 进度文案的分母：相邻点对的总数
+  const total = days.reduce((sum, day) => sum + Math.max(day.items.length - 1, 0), 0)
   let checked = 0
 
-  for (const day of plan.days) {
+  for (const day of days) {
     for (let index = 1; index < day.items.length; index++) {
       const previous = day.items[index - 1]
       const current = day.items[index]
       checked += 1
-      if (total > 0) report(`正在核对通勤路线（${checked}/${total * plan.days.length}）`)
+      if (total > 0) report(`正在核对通勤路线（${checked}/${total}）`)
 
       const minutes = await commuteMinutes(
         asPoi(previous),
@@ -752,7 +792,7 @@ export async function optimizeCommute(
       // 超时了，看看能不能换个更近的地点
       const replacement = pickReplacement(asPoi(previous), asPoi(current), registry, usedPoiIds)
       if (!replacement) {
-        plan.warnings.push(
+        warnings.push(
           `第 ${day.dayIndex} 天「${previous.name}」到「${current.name}」需要约 ${minutes} 分钟，` +
             `超过 ${MAX_COMMUTE_MINUTES} 分钟且没有更合适的替代地点，请留意`,
         )
@@ -761,12 +801,12 @@ export async function optimizeCommute(
 
       const replacementMinutes = await commuteMinutes(asPoi(previous), replacement)
       if (replacementMinutes !== null && replacementMinutes > MAX_COMMUTE_MINUTES) {
-        plan.warnings.push(
+        warnings.push(
           `第 ${day.dayIndex} 天「${previous.name}」到「${current.name}」需要约 ${minutes} 分钟，` +
             `已替换为「${replacement.name}」仍需 ${replacementMinutes} 分钟，建议当天减少一个地点`,
         )
       } else {
-        plan.warnings.push(
+        warnings.push(
           `第 ${day.dayIndex} 天原安排的「${current.name}」距上一个地点约 ${minutes} 分钟，` +
             `已换成更近的「${replacement.name}」`,
         )
@@ -783,6 +823,8 @@ export async function optimizeCommute(
       day.items[index].commuteMinutes = replacementMinutes
     }
   }
+
+  return warnings
 }
 
 /** 把已落库的条目反向还原成 POI 需要的形状（换点时要用坐标） */

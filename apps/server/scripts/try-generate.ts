@@ -5,8 +5,11 @@
 // 能在终端看到每一次工具调用和最终产出，排查最快。
 //
 // 用法（二选一）：
-//   在项目根目录：npm run try:generate -- [用户名] [天数]
-//   在 apps/server 目录：npx tsx scripts/try-generate.ts [用户名] [天数]
+//   在项目根目录：npm run try:generate -- [用户名] [天数] [restart]
+//   在 apps/server 目录：npx tsx scripts/try-generate.ts [用户名] [天数] [restart]
+//
+// 第三个参数传 restart 表示清空重来；不传则按默认的 continue 语义，
+// 从第一个还没排好的天往后接着排。
 //
 // 注意别站在 apps 目录下敲路径 —— 脚本在 apps/server/scripts 里，不是 apps/scripts。
 
@@ -16,6 +19,7 @@ import { geocode } from '../src/services/amap'
 
 const username = process.argv[2] ?? '123'
 const days = Number(process.argv[3] ?? 2)
+const mode = process.argv[4] === 'restart' ? 'restart' : 'continue'
 
 const user = await prisma.user.findUnique({ where: { username } })
 if (!user) {
@@ -54,11 +58,11 @@ const trip = await prisma.trip.create({
 })
 
 console.log(`已创建测试行程：${trip.id}（${cityName} ${days} 天，未定住宿）`)
-console.log('开始生成……\n')
+console.log(`开始生成……（模式：${mode}，每天一次请求）\n`)
 
 const startedAt = Date.now()
 try {
-  await generateTrip(trip.id)
+  await generateTrip(trip.id, { mode })
 } catch (error) {
   console.log(`\n生成失败：${error instanceof Error ? error.message : String(error)}`)
 }

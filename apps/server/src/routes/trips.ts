@@ -205,9 +205,23 @@ tripsRouter.patch('/:id/stay', async (req, res, next) => {
 // 允许重新触发，避免用户永远等一个不会完成的进度。
 const STALE_GENERATING_MS = 10 * 60 * 1000
 
+// 触发生成时可选的两档语义：
+//   continue —— 保留已经排好的天，从第一个空缺的天接着排（默认，失败后重试也走这条）
+//   restart  —— 清空已有安排，从第 1 天重新排（用户点「重新生成」时用）
+const generateSchema = z.object({
+  mode: z.enum(['continue', 'restart']).default('continue'),
+})
+
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
 tripsRouter.post('/:id/generate', async (req, res, next) => {
   try {
+    const parsed = generateSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: '参数不合法' })
+      return
+    }
+    const mode = parsed.data.mode
+
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.id, userId: req.user!.userId },
       select: { id: true, status: true, updatedAt: true },
@@ -227,12 +241,16 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
 
     await prisma.trip.update({
       where: { id: trip.id },
-      data: { status: 'generating', genProgress: '正在准备', genError: null },
+      data: {
+        status: 'generating',
+        genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
+        genError: null,
+      },
     })
 
     // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
     // 失败时把原因写进 genError，前端就能直接展示给用户看。
-    void generateTrip(trip.id).catch(async (error: unknown) => {
+    void generateTrip(trip.id, { mode }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '生成失败'
       console.error(`[生成 ${trip.id}] 失败：${message}`)
       await prisma.trip
@@ -243,7 +261,7 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
         .catch(() => undefined)
     })
 
-    res.status(202).json({ ok: true, status: 'generating' })
+    res.status(202).json({ ok: true, status: 'generating', mode })
   } catch (err) {
     next(err)
   }

@@ -13,7 +13,8 @@
     "db:studio": "prisma studio",
     "try:generate": "tsx scripts/try-generate.ts",
     "check:credential": "tsx scripts/check-credential.ts",
-    "check:parser": "tsx scripts/check-parser.ts"
+    "check:parser": "tsx scripts/check-parser.ts",
+    "check:scheduler": "tsx scripts/check-scheduler.ts"
   },
   "dependencies": {
     "@libsql/client": "0.17.0",

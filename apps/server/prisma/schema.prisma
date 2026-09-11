@@ -99,6 +99,8 @@ model Trip {
 
   /// 生成进度文案，生成过程中实时更新，前端轮询时展示给用户看
   genProgress String?
+  /// 逐天生成时「已完成到第几天」。null 表示一天都还没排完
+  genDayIndex Int?
   /// 生成失败的原因。status 为 failed 时才有值
   genError String?
 

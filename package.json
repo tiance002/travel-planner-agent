@@ -16,6 +16,7 @@
     "try:generate": "npm run try:generate -w @travel/server --",
     "check:credential": "npm run check:credential -w @travel/server --",
     "check:parser": "npm run check:parser -w @travel/server",
+    "check:scheduler": "npm run check:scheduler -w @travel/server",
     "build": "npm run build -w @travel/server && npm run build -w @travel/web"
   },
   "devDependencies": {
