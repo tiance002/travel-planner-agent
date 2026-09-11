@@ -37,6 +37,7 @@ export interface ChatRequest {
   /** 强制模型只输出 JSON。要求提示词里必须出现 json 字样，否则部分厂商会报错 */
   jsonMode?: boolean
   maxTokens?: number
+  temperature?: number
   timeoutMs?: number
 }
 
@@ -74,6 +75,16 @@ const DEFAULT_TIMEOUT_MS = 90_000
  */
 const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.MODEL_MAX_OUTPUT_TOKENS ?? 8192)
 
+/**
+ * 采样温度。取值越小，模型越「保守、可预测」；越大越发散。
+ *
+ * 为什么这里要显式压低：温度本质上控制「下一词从概率分布里怎么抽」。
+ * 温度高时，那些概率很低但语法上说得通的怪东西——比如数字后面凭空多出一个引号——
+ * 就有机会被抽出来。而排行程这件事本身不需要创造力（地点都由工具给定了），
+ * 需要的是**稳定的格式**。DeepSeek 默认温度是 1.0，对结构化输出偏高。
+ */
+const DEFAULT_TEMPERATURE = 0.3
+
 /** 发起一次对话请求。出错时抛出带中文说明的 Error */
 export async function chatCompletion(request: ChatRequest): Promise<ChatResponse> {
   const baseUrl = request.credentials.baseUrl.replace(/\/+$/, '')
@@ -85,6 +96,8 @@ export async function chatCompletion(request: ChatRequest): Promise<ChatResponse
     stream: false,
     // 始终显式指定，别交给厂商默认值决定——默认值往往是截断的源头
     max_tokens: request.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    // 同样显式指定，别用厂商默认值（DeepSeek 默认 1.0，对格式化输出偏高）
+    temperature: request.temperature ?? DEFAULT_TEMPERATURE,
   }
   if (request.tools && request.tools.length > 0) {
     body.tools = request.tools
@@ -167,6 +180,8 @@ export interface ToolLoopOptions {
   executeTool: (name: string, args: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>
   /** 最多往返多少轮，防止模型反复调用工具停不下来 */
   maxRounds?: number
+  /** 采样温度，默认 0.3 */
+  temperature?: number
   /** 每轮开始前调用，可用来读取最新的进度或检查是否已被取消 */
   beforeRound?: (round: number) => void
   /** 调试日志 */
@@ -206,6 +221,7 @@ export async function runToolLoop(options: ToolLoopOptions): Promise<ToolLoopRes
       credentials: options.credentials,
       messages,
       tools: options.tools,
+      temperature: options.temperature,
     })
 
     messages.push({
@@ -259,18 +275,33 @@ export async function reaskForJson(options: {
   messages: ChatMessage[]
   /** 上一次失败的具体原因，会原样转达给模型，让它知道该改什么 */
   feedback: string
+  /** 出错位置附近的原文片段。比一句「格式错误」有用得多 */
+  fragment?: string
   /** 让模型收敛篇幅，用于「上次被截断」的情形 */
   askShorter?: boolean
   log?: (line: string) => void
 }): Promise<{ content: string; messages: ChatMessage[]; finishReason: string }> {
   const parts = [
     `你上一条回复不能被解析，原因：${options.feedback}`,
+  ]
+  if (options.fragment) {
+    parts.push(
+      '',
+      '出错位置附近的原文（供你对照检查）：',
+      '```',
+      options.fragment,
+      '```',
+      '常见毛病：数字或字符串后面多打了一个引号、两个字段之间漏了逗号、',
+      '字符串里出现了没有反斜杠转义的引号。请仔细核对。',
+    )
+  }
+  parts.push(
     '',
     '请重新输出最终结果，要求：',
     '1. 只输出一个 JSON 对象，不要任何解释文字，不要 Markdown 代码块；',
     '2. 字符串内部不要出现未转义的换行与引号；',
     '3. 地点只能使用此前工具返回过的 poiId。',
-  ]
+  )
   if (options.askShorter) {
     parts.push(
       '4. 上一次输出因超出长度上限被截断，这次请**明显缩短**每个地点的 note 与每天的 summary',
@@ -289,6 +320,8 @@ export async function reaskForJson(options: {
     credentials: options.credentials,
     messages,
     jsonMode: true,
+    // 重说这一轮的唯一目标是「格式正确」，把随机性压到最低
+    temperature: 0.1,
   })
 
   messages.push({

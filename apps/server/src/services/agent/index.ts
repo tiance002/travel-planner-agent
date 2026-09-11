@@ -106,6 +106,7 @@ async function resolvePlanJson(input: {
       credentials: input.credentials,
       messages: input.messages,
       feedback: reason,
+      fragment: error instanceof PlanParseError ? error.fragment : undefined,
       askShorter: truncated,
       log: input.log,
     })

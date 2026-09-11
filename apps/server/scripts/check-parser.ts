@@ -77,6 +77,35 @@ const cases: Case[] = [
     expectTruncated: true,
   },
 
+  // 下面三条来自 2026-09-11 的真实故障存档（DeepSeek 输出）。当时生成连续两次失败，
+  // 根因就是第一、二条：数字值后面凭空多出一个引号。改解析器时务必保住这几条。
+  {
+    name: '真实故障：数字值后多一个引号（单处）',
+    input: clean.replace('"dayIndex":1,', '"dayIndex":1",'),
+    expectSpots: 2,
+  },
+
+  {
+    name: '真实故障：数字值后多一个引号（多处）',
+    input: clean
+      .replace('"dayIndex":1,', '"dayIndex":1",')
+      .replace('"poiId":"P001"', '"poiId":"P001""')
+      .replace('"poiId":"R001"', '"poiId":"R001""'),
+    expectSpots: 2,
+  },
+
+  {
+    name: '两个字段之间漏了逗号',
+    input: clean.replace('"dayIndex":1,', '"dayIndex":1'),
+    expectSpots: 2,
+  },
+
+  {
+    name: '中文全角逗号被当成字段分隔符',
+    input: clean.replace('"dayIndex":1,', '"dayIndex":1，'),
+    expectSpots: 2,
+  },
+
   { name: '完全不是 JSON', input: '抱歉，我无法完成这个请求。', expectSpots: null },
 
   { name: '空字符串', input: '', expectSpots: null },

@@ -74,52 +74,79 @@ export interface RawPlan {
 }
 
 /**
- * 解析失败时抛出。比普通的 Error 多带两个信息，方便上层决定怎么补救：
+ * 解析失败时抛出。比普通的 Error 多带几个信息，方便上层决定怎么补救：
  *   - truncated：是不是「话没说完」被截断了（对应重新输出时要它缩短篇幅）
- *   - snippet：模型当时写到哪里，直接打进日志，省得再复现一次
+ *   - snippet：原文尾部，便于在日志里一眼看出写到哪
+ *   - fragment：出错位置附近的原文，回传给模型让它知道该改哪里
  */
 export class PlanParseError extends Error {
   readonly truncated: boolean
   readonly snippet: string
+  readonly fragment: string
 
-  constructor(message: string, detail: { truncated: boolean; snippet: string }) {
+  constructor(
+    message: string,
+    detail: { truncated: boolean; snippet: string; fragment?: string },
+  ) {
     super(message)
     this.name = 'PlanParseError'
     this.truncated = detail.truncated
     this.snippet = detail.snippet
+    this.fragment = detail.fragment ?? ''
   }
 }
 
 /**
  * 把模型返回的文本解析成 JSON。
  *
- * 模型输出失手的花样比想象中多，这里按「从轻到重」依次尝试三种解析方式，
- * 能救回的都救回，救不了的才抛错：
- *   1. 原样解析：剥掉 Markdown 代码块和前后废话后直接 parse（覆盖九成情况）
- *   2. 修小毛病：字符串里有没转义的换行、对象末尾多了个逗号
- *   3. 截断修复：输出到一半撞上长度上限，最后一个地点写到一半就断了
+ * 模型输出失手的花样比想象中多。这里按「修复力度由轻到重」逐级尝试，
+ * 能救回的都救回，救不了的才抛错。之所以这么不遗余力：
+ * 一次失败的代价是用户白白等上几十秒、几十次高德查询全部作废，
+ * 而多试几种解析的代价只有几毫秒。
+ *
+ * 修复阶梯：
+ *   ① 原样解析 —— 剥掉 Markdown 代码块和前后废话后直接 parse，覆盖绝大多数情况
+ *   ② 修转义与尾逗号 —— 字符串里有裸换行、对象末尾多了个逗号
+ *   ③ 引号级定向修复 —— 值后面凭空多一个引号，或两个字段之间漏了逗号
+ *   ④ 截断补全 —— 写到一半撞上长度上限，退回最后一个完整值再补齐括号
+ *   ⑤ 全角逗号归一 —— 模型拿中文逗号当字段分隔符
  */
 export function parsePlanJson(text: string): RawPlan {
-  const cleaned = stripWrappers(text ?? '')
+  const raw = text ?? ''
+  const cleaned = stripWrappers(raw)
   const scan = extractJsonObject(cleaned)
 
-  // 1) 原样解析
   if (scan.text) {
+    // ① 原样
     const direct = tryParse(scan.text)
     if (direct) return direct
 
-    // 2) 修掉未转义的控制字符与多余的尾逗号，再试一次
+    // ② 修未转义的控制字符与多余的尾逗号
     const repaired = stripTrailingCommas(escapeControlCharsInStrings(scan.text))
     const afterRepair = tryParse(repaired)
     if (afterRepair) return afterRepair
 
-    // 3) 截断修复：丢掉最后一个残缺片段，补齐未闭合的括号
+    // ③ 引号级定向修复（多余的引号 / 漏掉的逗号），可连续修多处
+    const byFeedback = repairWithParserFeedback(repaired)
+    if (byFeedback) return byFeedback
+
+    // ④ 截断补全；截断往往还伴随引号问题，所以补完再修一遍
     const patched = closeTruncatedJson(repaired)
-    const afterPatch = patched ? tryParse(patched) : null
-    if (afterPatch) return afterPatch
+    if (patched) {
+      const afterPatch = tryParse(patched)
+      if (afterPatch) return afterPatch
+      const quotedPatch = repairWithParserFeedback(patched)
+      if (quotedPatch) return quotedPatch
+    }
+
+    // ⑤ 全角逗号当分隔符，再配合前两种修复
+    const normalized = stripTrailingCommas(normalizeFullWidthSeparators(scan.text))
+    const afterNormalize = tryParse(normalized)
+    if (afterNormalize) return afterNormalize
+    const quotedNormalize = repairWithParserFeedback(normalized)
+    if (quotedNormalize) return quotedNormalize
   }
 
-  const raw = text ?? ''
   throw new PlanParseError(
     scan.text
       ? '模型输出的 JSON 无法解析'
@@ -127,6 +154,7 @@ export function parsePlanJson(text: string): RawPlan {
     {
       truncated: !scan.closed,
       snippet: raw.slice(-300),
+      fragment: describeFailure(scan.text ?? cleaned),
     },
   )
 }
@@ -138,6 +166,117 @@ function tryParse(text: string): RawPlan | null {
     return value && typeof value === 'object' ? (value as RawPlan) : null
   } catch {
     return null
+  }
+}
+
+/**
+ * 按「解析器反馈」逐处修复 JSON 结构。
+ *
+ * 这是对付模型手滑的主力手段。真实观察到的一类毛病长这样：
+ *   {"poiId":"B000A8XAW9"","itemType":"spot",…}
+ *                        ↑ 值以数字结尾时，后面凭空多出一个引号
+ * 一份回复里能连出六处。一个多余的引号会让其后所有引号的「开/关」配对
+ * 整体错位，整段 JSON 报废，而且**报错位置可能离真正出错的地方很远**。
+ *
+ * 思路：不自己写解析器，而是**借 JSON.parse 当探子**——
+ * 它会在报错里给出出错的下标，那正是结构出问题的地方。我们只在那里做一个小判断：
+ *
+ *   - 若这个引号后面（配对之后）紧跟冒号 → 它是个键名，说明前面漏了逗号 → 补一个逗号
+ *   - 否则 → 这个引号本身是多余的 → 删掉它
+ *
+ * 改完重新交给 JSON.parse 验收，不行就再来一轮。能处理「一处」也能处理「六处」，
+ * 因为每轮只动一个字符、每轮都有解析器把关。
+ */
+function repairWithParserFeedback(text: string): RawPlan | null {
+  /** 最多修多少处。设个上限，防止在畸形文本上空转 */
+  const MAX_ROUNDS = 50
+  let current = text
+
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const parsed = tryParse(current)
+    if (parsed) return parsed
+
+    const position = locateParseError(current)
+    if (position === null) return null
+
+    // 只处理「引号」这一类毛病，其余情况交给修复阶梯上的其它步骤
+    if (current[position] !== '"') return null
+
+    const end = findStringEnd(current, position)
+    if (end === -1) return null
+    const isKey = nextNonSpaceChar(current, end + 1) === ':'
+
+    const repaired = isKey
+      ? `${current.slice(0, position)},${current.slice(position)}`
+      : current.slice(0, position) + current.slice(position + 1)
+
+    if (repaired === current) return null
+    current = repaired
+  }
+
+  return null
+}
+
+/** 让 JSON.parse 报出出错位置；取不到（例如「输入意外结束」）返回 null */
+function locateParseError(text: string): number | null {
+  try {
+    JSON.parse(text)
+    return null
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    const match = /position (\d+)/.exec(message)
+    return match ? Number(match[1]) : null
+  }
+}
+
+/** 从 startIndex 处的引号开始，找与之配对的结束引号的下标；找不到返回 -1 */
+function findStringEnd(text: string, startIndex: number): number {
+  for (let i = startIndex + 1; i < text.length; i++) {
+    if (text[i] === '"' && !isEscapedAt(text, i)) return i
+  }
+  return -1
+}
+
+/** 判断某个位置的字符是否被反斜杠转义（前面连续奇数个反斜杠即为转义） */
+function isEscapedAt(text: string, index: number): boolean {
+  let backslashes = 0
+  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) backslashes++
+  return backslashes % 2 === 1
+}
+
+/** 取 index 之后最近的一个非空白字符，没有则返回空串 */
+function nextNonSpaceChar(text: string, index: number): string {
+  for (let i = index; i < text.length; i++) {
+    const ch = text[i]!
+    if (!/\s/.test(ch)) return ch
+  }
+  return ''
+}
+
+/**
+ * 把「当前处于字段分隔位置」的中文全角逗号换成英文半角逗号。
+ *
+ * 中文输入法下模型偶尔会用「，」当字段分隔符。判断「处于分隔位置」的依据是：
+ * 前面是一个已结束的值（引号、括号或数字），后面紧跟一个新的键名引号。
+ * 这样就不会误伤字符串正文里的中文逗号——那里的逗号前面是汉字。
+ */
+function normalizeFullWidthSeparators(text: string): string {
+  return text.replace(/(["\]\}\d])\s*，\s*(?=")/g, '$1,')
+}
+
+/** 从 JSON.parse 的报错里提取位置，截取附近原文，用于回传给模型 */
+function describeFailure(text: string): string {
+  try {
+    JSON.parse(text)
+    return ''
+  } catch (error) {
+    const message = error instanceof Error ? error.message : ''
+    const match = /position (\d+)/.exec(message)
+    if (!match) return ''
+    const position = Number(match[1])
+    const from = Math.max(0, position - 40)
+    const to = Math.min(text.length, position + 40)
+    return `${message}\n…${text.slice(from, to)}…`
   }
 }
 
@@ -410,28 +549,28 @@ function arrangeDay(items: { poi: Poi; note: string }[]): { poi: Poi; note: stri
   const spotSlots = ['morning', 'afternoon', 'evening']
   const result: { poi: Poi; note: string; slot: string }[] = []
 
-  // 餐厅尽量均分到景点之间的空隙；只有 1 个景点时全部放在它之后
-  const gaps = Math.max(spots.length - 1, 1)
-
+  // 每个景点后面最多跟一家餐厅，形成「景点 → 餐饮 → 景点 → 餐饮」的交替节奏。
+  //
+  // 为什么不用「把餐厅均分到各个空隙」的算法：那种写法在「2 个景点 + 2 家餐厅」时
+  // 算出的空隙数是 1，两家餐厅会**一起挤在同一个空隙里**，结果就是同一天出现
+  // 两家连排的午餐（实测出现过）。改成「一个景点后面最多一家」之后，
+  // 从结构上就不可能连排，也不需要在事后检查。
+  // 最后一个景点之后的那家算晚餐，其余算午餐。
   spots.forEach((spot, index) => {
     result.push({ poi: spot.poi, note: spot.note, slot: spotSlots[index] ?? 'evening' })
 
-    // 这个景点之后该分配几家餐厅
-    const quota = Math.floor(restaurants.length / gaps) + (index < restaurants.length % gaps ? 1 : 0)
-    for (let n = 0; n < quota; n++) {
-      const restaurant = restaurants.shift()
-      if (!restaurant) break
-      // 最后一个景点之后的餐厅算晚餐，其余算午餐
-      const isLastGap = index === spots.length - 1
-      result.push({ poi: restaurant.poi, note: restaurant.note, slot: isLastGap ? 'evening' : 'noon' })
-    }
+    const restaurant = restaurants.shift()
+    if (!restaurant) return
+    const isLastSpot = index === spots.length - 1
+    result.push({
+      poi: restaurant.poi,
+      note: restaurant.note,
+      slot: isLastSpot ? 'evening' : 'noon',
+    })
   })
 
-  // 极端情况下还有餐厅没分配出去（空隙数为 0 等），补在末尾
-  for (const restaurant of restaurants) {
-    result.push({ poi: restaurant.poi, note: restaurant.note, slot: 'evening' })
-  }
-
+  // 景点数量之外的餐厅没有合法位置可放（放哪都会和另一家连排），
+  // 保留在 restaurants 里由调用方记账并提示，不硬塞进结果
   return result
 }
 
@@ -500,6 +639,17 @@ export function validatePlan(raw: RawPlan, registry: Map<string, Poi>, expectedD
       }
       days.push({ dayIndex: safeDayIndex, summary: '', items: [] })
       return
+    }
+
+    // 餐厅比景点还多时，多出来的那几家没有合法位置——放哪都会和另一家连排，
+    // 只能略去。这里如实说明，免得用户以为推荐里本来就没有。
+    const keptRestaurants = arranged.filter((entry) => isRestaurant(entry.poi)).length
+    const droppedRestaurants =
+      collected.filter((entry) => isRestaurant(entry.poi)).length - keptRestaurants
+    if (droppedRestaurants > 0) {
+      warnings.push(
+        `第 ${safeDayIndex} 天的餐厅数量多于景点数量，${droppedRestaurants} 家会与前后的餐厅挨在一起，已略去`,
+      )
     }
 
     const items = arranged.map((entry, index) =>

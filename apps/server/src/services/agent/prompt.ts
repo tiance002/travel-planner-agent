@@ -50,7 +50,6 @@ export function buildSystemPrompt(): string {
   "stay": { "poiId": "住宿锚点的 poiId", "name": "名称", "reason": "为什么选它当锚点" },
   "days": [
     {
-      "dayIndex": 1,
       "summary": "用一句话概括这一天的基调",
       "items": [
         { "poiId": "地点的 poiId", "itemType": "spot", "slot": "morning", "note": "推荐理由、怎么玩、注意事项" },
@@ -61,11 +60,21 @@ export function buildSystemPrompt(): string {
 }
 
 字段取值约定：
+- **不要输出 dayIndex。** 第几天按 days 数组的先后顺序判定，服务端自己编号。
+  （这是刻意省掉的：让模型少写一个数字字段，就少一处出格式错的机会。）
 - itemType 只能是 spot（游览类）或 restaurant（餐厅）。
 - slot 只能是 morning（上午）、noon（中午）、afternoon（下午）、evening（晚上）。
-- days 数组长度必须等于行程天数，dayIndex 从 1 开始连续编号。
+- days 数组长度必须等于行程天数，按第 1 天到第 N 天依次排列。
 - 每天至少包含 1 个 spot。若某天确实安排不下，宁可少排也不要编造地点。
-- 如果用户已经确定了住宿，stay 必须原样使用用户给的住宿 poiId。`
+- 如果用户已经确定了住宿，stay 必须原样使用用户给的住宿 poiId。
+
+# 输出格式的硬要求
+
+- 只输出 JSON 本体，**第一个字符必须是左花括号，最后一个字符必须是右花括号**。
+- 不要写任何开场白、思考过程或补充说明（例如「All routes verified」这类话不要出现）。
+- 数字类型的字段后面**不要加引号**；字符串用双引号成对包起来，不要多打引号。
+- 字符串内部不要出现真正的换行；需要换行时写成反斜杠加 n 两个字符。
+- 字符串内部的双引号必须写成反斜杠加引号。`
 }
 
 export function buildUserPrompt(input: GenerateInput): string {
