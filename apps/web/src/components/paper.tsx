@@ -8,36 +8,60 @@
 //   - 结构性的颜色（纸色、格线、胶带、书签）写在 index.css 的 CSS 变量里，
 //     因为 ::before/::after 伪元素取不到 React 的 token；
 //   - 需要按索引轮换的颜色（便利贴的淡彩）在 JS 里给，因为要用到序号。
+//
+// **颜色一律从 React 的主题状态派生，不要去读 documentElement.dataset.theme。**
+// 那个属性是在 useEffect 里才更新的，与渲染存在一帧的时间差，
+// 会造成「一半颜色是新主题、一半还是旧主题」的错配（见 usePaperTheme 的说明）。
 
 import { theme } from 'antd'
 import type { ReactNode } from 'react'
 import { useTheme } from '../theme'
 
-/** 便利贴的淡彩色。白天用高亮度的淡彩，黑夜换成同色系的暗调 */
-const STICKY_DAY = ['#fdf3c6', '#e3f0d5', '#fbe3dd', '#dce9f4', '#efe6f7', '#f6ecd6']
-const STICKY_NIGHT = ['#4b4734', '#36452e', '#4a3838', '#33414f', '#43394f', '#473f30']
+/**
+ * 便利贴的底色：**白天黑夜都用浅色调**。
+ *
+ * 为什么黑夜也坚持用浅色：真实的手帐里，便利贴是实打实的浅色纸，
+ * 贴在深色封面上反而最醒目。更重要的是，浅底 + 深墨能保证对比度——
+ * 之前黑夜用暗调便利贴、配浅色字，两边都灰蒙蒙的，字很难看清。
+ */
+const STICKY_LIGHT = ['#fdf3c6', '#e3f0d5', '#fbe3dd', '#dce9f4', '#efe6f7', '#f6ecd6']
 
 /**
- * 便利贴底色，按索引轮换。
- *
- * 轮换而不是随机：随机每次渲染都可能变，用户滚动时颜色乱跳，像出了 bug。
- * 按索引取则同一张便利贴颜色永远稳定，整页又有变化。
+ * 便利贴上的墨色。底色恒为浅色，所以墨色也恒定用深褐，对比度天然拉满。
+ * 这里刻意不跟随主题——跟随的话黑夜会翻成浅字，压在浅底上直接看不见。
  */
-export function stickyColor(index: number): string {
-  const palette = document.documentElement.dataset.theme === 'night' ? STICKY_NIGHT : STICKY_DAY
-  return palette[index % palette.length]
-}
+export const NOTE_INK = '#3a3226'
+/** 次级文字的墨色。alpha 别压太低——便利贴上信息密度大，太淡就看不清了 */
+const NOTE_INK_SOFT = 'rgba(58, 50, 38, 0.8)'
+/** 便利贴上的描边/分隔线，由墨色派生，深浅自然跟着走 */
+const NOTE_RULE = 'rgba(58, 50, 38, 0.16)'
 
-/** 便利贴上的墨色。白天深褐，黑夜浅灰，保证压在对应底色上都读得清 */
-export function useStickyInk() {
+/**
+ * 纸质主题的取色入口。**所有颜色都从 React 的主题状态派生**。
+ *
+ * 早先这里犯过一个隐蔽的错：便利贴底色读的是 `document.documentElement.dataset.theme`
+ * （DOM 属性），而墨色读的是 React 的 `mode`。切换主题时，DOM 属性是在 useEffect 里
+ * 才更新的，于是存在一帧「底色已经是新主题、墨色还是旧主题」的空档——
+ * 表现成**浅底配浅字，整张便利贴上的字全糊了**。现在两者同源，不可能再错开。
+ */
+export function usePaperTheme() {
   const { mode } = useTheme()
   const isNight = mode === 'night'
   return {
     isNight,
-    ink: isNight ? '#dde4ec' : '#3a3226',
-    inkSoft: isNight ? 'rgba(221, 228, 236, 0.66)' : 'rgba(58, 50, 38, 0.62)',
-    /** 便利贴上的分隔线，用当前墨色派生，深浅自然跟着走 */
-    rule: isNight ? 'rgba(221, 228, 236, 0.16)' : 'rgba(58, 50, 38, 0.13)',
+    /** 便利贴：恒为浅底 + 深墨 */
+    note: {
+      palette: STICKY_LIGHT,
+      colorAt: (index: number) => STICKY_LIGHT[index % STICKY_LIGHT.length],
+      ink: NOTE_INK,
+      inkSoft: NOTE_INK_SOFT,
+      rule: NOTE_RULE,
+    },
+    /** 纸页上的文字（线圈本的说明文字等）：这部分要跟着主题走 */
+    page: {
+      ink: isNight ? '#d2d9e2' : '#3d3527',
+      inkSoft: isNight ? 'rgba(210, 217, 226, 0.66)' : 'rgba(61, 53, 39, 0.62)',
+    },
   }
 }
 
@@ -59,6 +83,7 @@ export function StickyNote({
   children: ReactNode
   style?: React.CSSProperties
 } & Omit<React.HTMLAttributes<HTMLDivElement>, 'style'>) {
+  const { note } = usePaperTheme()
   // 交替正负，并且每 4 张回到同一方向，避免出现规律性的「锯齿」
   const tilt = [0.7, -0.55, 0.4, -0.75][index % 4]
 
@@ -67,7 +92,7 @@ export function StickyNote({
       className="sticky-note"
       style={{
         ['--tilt' as string]: `${tilt}deg`,
-        background: color ?? stickyColor(index),
+        background: color ?? note.colorAt(index),
         ...style,
       }}
       {...rest}

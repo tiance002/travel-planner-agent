@@ -203,12 +203,14 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 12px;
-  /* 细长：比常规列表卡片矮不少，一排能多看好几条 */
-  min-height: 48px;
-  padding: 0 34px 0 14px;
-  /* 右端 V 口 */
-  clip-path: polygon(0 0, 100% 0, calc(100% - 15px) 50%, 100% 100%, 0 100%);
+  gap: 18px;
+  /* 厚度比第一版放大约 5/3（48px → 80px）：原来是细长条，
+     里面塞两行信息会显得很挤。加厚之后行距、内边距都能舒展开。
+     「细长」靠的是横向远长于纵向，不是靠压薄。 */
+  min-height: 80px;
+  padding: 14px 52px 14px 24px;
+  /* 右端 V 口。缺口宽度也跟着厚度走，太窄的话在厚书签上会看不出来 */
+  clip-path: polygon(0 0, 100% 0, calc(100% - 22px) 50%, 100% 100%, 0 100%);
   border-radius: 3px 0 0 3px;
   /* 牛皮纸有方向性的纤维，用 115° 的斜向渐变比纯色更有纸感。
      渐变之外还要给一个 background-color 兜底——裁剪后如果只剩渐变，
@@ -232,11 +234,11 @@ body {
 .bookmark::before {
   content: '';
   position: absolute;
-  left: 7px;
+  left: 10px;
   top: 50%;
-  width: 7px;
-  height: 7px;
-  margin-top: -3.5px;
+  width: 9px;
+  height: 9px;
+  margin-top: -4.5px;
   border-radius: 50%;
   background: var(--mark-hole);
   box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35);
@@ -256,14 +258,14 @@ body {
   );
 }
 
-/* 书签上的信息标。比正文小一号，用半透明白，保证压在任何纸色上都可读 */
+/* 书签上的信息标。加厚之后可以给足内边距，不必再挤在一起 */
 .bookmark-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 1px 8px;
+  gap: 5px;
+  padding: 3px 11px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: 12.5px;
   line-height: 1.7;
   color: var(--mark-ink-dim);
   background: rgba(255, 255, 255, 0.13);
@@ -344,13 +346,15 @@ body {
   box-shadow: 0 1px 2px rgba(90, 76, 48, 0.16), 0 7px 16px rgba(90, 76, 48, 0.13);
   transform: rotate(var(--tilt, 0deg));
   transform-origin: 50% 8%;
-  transition: transform 0.2s cubic-bezier(0.34, 1.4, 0.64, 1), box-shadow 0.2s ease;
+  /* 只过渡阴影。
+     刻意不做位移和旋转的悬停效果——用户明确说过「鼠标移上去不要晃」。
+     原来是转正 + 上抬 + 回弹曲线，视觉上会有一阵抖动，安静下来更耐看。 */
+  transition: box-shadow 0.2s ease;
 }
 
 .sticky-note:hover {
-  /* 被手指按平的感觉：转正、微微抬起、阴影收紧 */
-  transform: rotate(0deg) translateY(-2px);
-  box-shadow: 0 2px 4px rgba(90, 76, 48, 0.18), 0 12px 24px rgba(90, 76, 48, 0.2);
+  /* 只把阴影轻微收紧一点表示「被指到了」，元素本身原地不动 */
+  box-shadow: 0 1px 2px rgba(90, 76, 48, 0.2), 0 10px 22px rgba(90, 76, 48, 0.18);
 }
 
 :root[data-theme='night'] .sticky-note {
@@ -358,7 +362,7 @@ body {
 }
 
 :root[data-theme='night'] .sticky-note:hover {
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.44), 0 12px 24px rgba(0, 0, 0, 0.46);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.44), 0 10px 22px rgba(0, 0, 0, 0.44);
 }
 
 /* 便利贴顶端两角的胶带。半透明，压在纸边上方，所以要允许溢出 */

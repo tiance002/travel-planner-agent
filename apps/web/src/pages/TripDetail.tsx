@@ -49,7 +49,7 @@ import {
   type TripItemData,
 } from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
-import { NotebookRings, StickyNote, useStickyInk } from '../components/paper'
+import { NotebookRings, StickyNote, usePaperTheme } from '../components/paper'
 
 /**
  * 便利贴上的小标。
@@ -346,13 +346,14 @@ export default function TripDetail() {
     [mapHeight],
   )
 
-  // 便利贴的墨色。
+  // 纸质主题的取色入口。note.* 是便利贴上的（恒为浅底深墨，不随主题翻），
+  // page.* 是纸页上的文字（跟着主题走）。
   //
   // **这个 hook 必须放在下面那两个提前 return 之前。**
   // React 要求每次渲染的 hook 数量与调用顺序完全一致：一旦放到提前 return 之后，
   // 第一次渲染（loading）会少走一个 hook、第二次却多走一个，直接抛
   // 「Rendered more hooks than during the previous render」，整页白屏。
-  const noteInk = useStickyInk()
+  const { note, page } = usePaperTheme()
 
   // --- 当天的派生数据 -----------------------------------------------------------
 
@@ -875,8 +876,8 @@ export default function TripDetail() {
                             padding: '14px 13px 11px',
                             // 选中的那张用主色描边加粗，告诉用户地图正在跟着它
                             border: isSelected
-                              ? `1.5px solid ${noteInk.ink}`
-                              : `1px solid ${noteInk.rule}`,
+                              ? `1.5px solid ${note.ink}`
+                              : `1px solid ${note.rule}`,
                             // 已打卡的便利贴像被翻过去一样压暗
                             opacity: done ? 0.62 : 1,
                             cursor: 'pointer',
@@ -920,28 +921,28 @@ export default function TripDetail() {
                               strong
                               style={{
                                 textDecoration: done ? 'line-through' : undefined,
-                                color: noteInk.ink,
+                                color: note.ink,
                               }}
                               className="trip-item-title"
                               data-testid="trip-item-title"
                             >
                               {item.name}
                             </Typography.Text>
-                            <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
+                            <NoteTag ink={note.ink} rule={note.rule}>
                               {item.itemType === 'restaurant' ? '餐厅' : '景点'}
                             </NoteTag>
                             {isTarget && (
-                              <NoteTag ink={noteInk.ink} rule={noteInk.rule} accent="primary">
+                              <NoteTag ink={note.ink} rule={note.rule} accent="primary">
                                 当前目标
                               </NoteTag>
                             )}
                             {item.rating && (
-                              <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
+                              <NoteTag ink={note.ink} rule={note.rule}>
                                 ★ {item.rating}
                               </NoteTag>
                             )}
                             {item.cost && (
-                              <NoteTag ink={noteInk.ink} rule={noteInk.rule}>
+                              <NoteTag ink={note.ink} rule={note.rule}>
                                 人均 ¥{item.cost}
                               </NoteTag>
                             )}
@@ -951,7 +952,7 @@ export default function TripDetail() {
                             {/* 左侧信息区 */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ marginTop: 4 }}>
-                                <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
+                                <Typography.Text style={{ fontSize: 12, color: note.inkSoft }}>
                                   {[
                                     item.openTimeText || (item.itemType === 'restaurant' ? '营业时间未知' : null),
                                     item.address,
@@ -964,7 +965,7 @@ export default function TripDetail() {
 
                               {item.note && (
                                 <div style={{ marginTop: 4 }}>
-                                  <Typography.Text style={{ fontSize: 12, color: noteInk.ink }}>
+                                  <Typography.Text style={{ fontSize: 12, color: note.ink }}>
                                     {item.note}
                                   </Typography.Text>
                                 </div>
@@ -1024,7 +1025,7 @@ export default function TripDetail() {
 
                           {segment && (
                             <div style={{ marginTop: 6 }}>
-                              <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
+                              <Typography.Text style={{ fontSize: 12, color: note.inkSoft }}>
                                 ↓ {segment}
                               </Typography.Text>
                             </div>
@@ -1036,8 +1037,10 @@ export default function TripDetail() {
                 ))
               )}
 
+                {/* 这句写在纸页上（不在便利贴里），所以用 page.* 的墨色：
+                    便利贴恒为浅底深墨、纸页跟着主题走，两者不能用同一套 */}
                 {dayItems.length > 0 && (
-                  <Typography.Text style={{ fontSize: 12, color: noteInk.inkSoft }}>
+                  <Typography.Text style={{ fontSize: 12, color: page.inkSoft }}>
                     营业时间、价格与开放状态由 AI 整理，请以实际为准。点击条目可在右侧地图定位。
                   </Typography.Text>
                 )}

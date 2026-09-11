@@ -87,9 +87,9 @@ export default function TripList() {
   }
 
   return (
-    <div style={{ maxWidth: 900, margin: '0 auto' }}>
+    <div style={{ maxWidth: 1120, margin: '0 auto' }}>
       <Space
-        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 14 }}
+        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 18 }}
         align="center"
       >
         <Space size={8}>
@@ -117,10 +117,11 @@ export default function TripList() {
         /* 书签是「夹在本子里」的，所以底下垫一整页纸，而不是让它们飘在背景上 */
         <PaperSheet
           style={{
-            padding: '20px 18px 24px 24px',
+            padding: '26px 24px 30px 30px',
             display: 'flex',
             flexDirection: 'column',
-            gap: 12,
+            // 书签之间留够空隙，堆在一起会显得挤
+            gap: 18,
           }}
         >
           {trips.map((trip) => {
@@ -137,14 +138,14 @@ export default function TripList() {
                   data-testid="trip-city-initial"
                   style={{
                     flex: '0 0 auto',
-                    minWidth: 40,
+                    minWidth: 52,
                     textAlign: 'center',
-                    fontSize: 14,
+                    fontSize: 17,
                     fontWeight: 600,
-                    letterSpacing: 1.5,
+                    letterSpacing: 2,
                     color: 'var(--mark-ink)',
                     borderRight: '1px dashed rgba(255, 255, 255, 0.3)',
-                    paddingRight: 12,
+                    paddingRight: 18,
                   }}
                 >
                   {cityInitial(trip.cityName)}
@@ -152,11 +153,11 @@ export default function TripList() {
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {/* 第一行：标题 + 状态 */}
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
                     <Typography.Text
                       strong
                       style={{
-                        fontSize: 14.5,
+                        fontSize: 16,
                         color: 'var(--mark-ink)',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
@@ -169,16 +170,16 @@ export default function TripList() {
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
-                        gap: 5,
-                        fontSize: 11.5,
+                        gap: 6,
+                        fontSize: 12.5,
                         color: 'var(--mark-ink-dim)',
                         flexShrink: 0,
                       }}
                     >
                       <span
                         style={{
-                          width: 6,
-                          height: 6,
+                          width: 7,
+                          height: 7,
                           borderRadius: '50%',
                           background: status.dot,
                           flexShrink: 0,
@@ -188,13 +189,13 @@ export default function TripList() {
                     </span>
                   </div>
 
-                  {/* 第二行：信息小字标 */}
+                  {/* 第二行：信息小字标。跟标题拉开一点距离，不要贴在一起 */}
                   <div
                     style={{
                       display: 'flex',
                       flexWrap: 'wrap',
-                      gap: 5,
-                      marginTop: 4,
+                      gap: 8,
+                      marginTop: 11,
                     }}
                   >
                     <span className="bookmark-tag" data-testid="trip-pill">

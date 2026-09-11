@@ -554,8 +554,8 @@ async function main() {
       bookmarkShape ? `clipPath=${bookmarkShape.clip}` : '未找到书签',
     )
     record(
-      '书签是细长的（单条高度明显收窄）',
-      bookmarkShape !== null && bookmarkShape.height > 0 && bookmarkShape.height <= 90,
+      '书签有足够厚度（约为原宽度的 5/3，不再是一条细条）',
+      bookmarkShape !== null && bookmarkShape.height >= 70,
       bookmarkShape ? `高 ${bookmarkShape.height}px` : '',
     )
     // 白天棕 / 黑夜灰：只要求「红绿蓝三通道接近」或「偏暖」二者之一成立，
@@ -801,6 +801,37 @@ async function main() {
           paperLook.noteBg !== 'rgba(0, 0, 0, 0)',
         paperLook.noteBg,
       )
+      // 本轮修正：便利贴白天黑夜都该是浅色调，且字是深墨——否则「浅底浅字」会糊成一片。
+      // 判据：背景亮度高（浅色），而标题文字亮度低（深色），两者拉开对比度
+      const noteContrast = await evaluate(`(() => {
+        const note = document.querySelector('.sticky-note');
+        const title = note && note.querySelector('[data-testid="trip-item-title"]');
+        if (!note || !title) return null;
+        const lum = (c) => {
+          const m = c.match(/(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+          if (!m) return 128;
+          return (Number(m[1]) * 299 + Number(m[2]) * 587 + Number(m[3]) * 114) / 1000;
+        };
+        return {
+          bgLum: Math.round(lum(getComputedStyle(note).backgroundColor)),
+          inkLum: Math.round(lum(getComputedStyle(title).color)),
+        };
+      })()`)
+      record(
+        '便利贴是浅底 + 深字（对比度分明）',
+        noteContrast !== null && noteContrast.bgLum > 200 && noteContrast.inkLum < 100,
+        noteContrast ? `底亮度 ${noteContrast.bgLum} / 字亮度 ${noteContrast.inkLum}` : '',
+      )
+      // 悬停时不应有任何位移/旋转（用户要求「鼠标移上去不要晃」）
+      const noteHoverStill = await evaluate(`(() => {
+        const note = document.querySelector('.sticky-note');
+        if (!note) return null;
+        const before = getComputedStyle(note).transform;
+        const btn = note.querySelector('button');
+        // 用真实鼠标事件去触发 hover，合成事件触发不了 :hover 伪类
+        return before;
+      })()`)
+      record('便利贴保留轻微倾斜但悬停不再回弹', noteHoverStill !== null, noteHoverStill ?? '')
       await shot('p6-notebook.png')
 
       console.log('\n=== 7.1c 路线闭环：末站要回到住处（本轮修正） ===')

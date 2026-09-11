@@ -313,8 +313,8 @@ export default function Settings() {
         <FormSection hint={`当前账号：${me?.username ?? '加载中…'}`}>个人资料</FormSection>
 
         {/* 头像：预设 emoji + 自定义上传 */}
-        <Field label="头像" hint="选一个系统形象，或上传自己的图片（会自动裁成方形并压缩）">
-          <Space size={20} wrap align="start">
+        <Field center label="头像" hint="选一个系统形象，或上传自己的图片（会自动裁成方形并压缩）">
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
             <div style={{ textAlign: 'center' }}>
               <UserAvatar avatar={me?.avatar} username={me?.username} size={72} style={{ display: 'block', margin: '0 auto 8px' }} />
               <Button
@@ -340,7 +340,7 @@ export default function Settings() {
               />
             </div>
 
-            <div style={{ maxWidth: 340 }}>
+            <div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 44px)', gap: 8 }}>
                 {PRESET_AVATARS.map((emoji) => {
                   const active = me?.avatar === `emoji:${emoji}`
@@ -360,11 +360,11 @@ export default function Settings() {
                 })}
               </div>
             </div>
-          </Space>
+          </div>
         </Field>
 
         {/* 用户名 */}
-        <Field label="用户名" hint="3-32 位字母、数字或下划线。修改后当前登录凭证会自动换新，无需重新登录">
+        <Field center label="用户名" hint="3-32 位字母、数字或下划线。修改后当前登录凭证会自动换新，无需重新登录">
           <Space.Compact style={{ width: 320 }}>
             <Input
               data-testid="username-input"
@@ -386,7 +386,7 @@ export default function Settings() {
         {/* 密码 */}
         <FormSection hint="改完需要用新密码重新登录">登录安全</FormSection>
 
-        <Field label="修改密码" hint="至少 8 位。修改成功后需要用新密码重新登录（当前会话仍有效）">
+        <Field center label="修改密码" hint="至少 8 位。修改成功后需要用新密码重新登录（当前会话仍有效）">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 320 }}>
             <Input.Password
               data-testid="old-password"
@@ -684,19 +684,32 @@ function compressImage(file: File, size: number): Promise<string> {
 function Field({
   label,
   hint,
+  center,
   children,
 }: {
   label: string
   hint?: string
+  /** 居中排版：标签、控件、说明都水平居中。用于账户设置这类「填自己的资料」的场景 */
+  center?: boolean
   children: ReactNode
 }) {
   const { token } = antdTheme.useToken()
   return (
-    <div style={{ marginBottom: 20 }}>
+    <div
+      style={{
+        marginBottom: 20,
+        display: center ? 'flex' : undefined,
+        flexDirection: center ? 'column' : undefined,
+        alignItems: center ? 'center' : undefined,
+        textAlign: center ? 'center' : undefined,
+      }}
+    >
       <div style={{ marginBottom: 6, fontWeight: 500 }}>{label}</div>
       {children}
       {hint && (
-        <div style={{ marginTop: 6, fontSize: 12, color: token.colorTextTertiary }}>{hint}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: token.colorTextTertiary, maxWidth: 360 }}>
+          {hint}
+        </div>
       )}
     </div>
   )
