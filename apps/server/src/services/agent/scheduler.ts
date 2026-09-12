@@ -962,7 +962,14 @@ export function resolveAnchorFromRaw(
 // 4. 通勤体检与换点
 // ---------------------------------------------------------------------------
 
-/** 查询两点之间的驾车耗时（分钟）。失败时返回 null，不阻断流程 */
+/**
+ * 查询两点之间的驾车耗时（分钟）。
+ *
+ * 路线查询失败时退回**直线距离估算**（绕行系数 1.4、市区均速 25km/h），
+ * 而不是返回 null——实测并行生成多个候选时，高德容易触发 QPS 限流，
+ * 整段通勤全变 null 会在对比卡片上显示成「通勤 0 分钟」，得出虚假结论。
+ * 估算只用于体检阈值与候选对比展示；地图上画的路线仍以高德路径规划为准。
+ */
 async function commuteMinutes(from: Poi, to: Poi): Promise<number | null> {
   try {
     const route = await planRoute({
@@ -972,10 +979,11 @@ async function commuteMinutes(from: Poi, to: Poi): Promise<number | null> {
       destLng: to.lng,
       destLat: to.lat,
     })
-    return Math.round(route.duration / 60)
+    return Math.max(1, Math.round(route.duration / 60))
   } catch {
-    // 路径查询失败不该让整份行程作废，交给用户按直线距离判断
-    return null
+    const meters = straightLineDistance(from, to)
+    // 市区驾车：绕行系数 1.4，均速 25km/h = 约 417 米/分钟
+    return Math.max(1, Math.round((meters * 1.4) / 417))
   }
 }
 

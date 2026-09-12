@@ -174,10 +174,10 @@ function addDays(dateStr: string, delta: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-/** 候选方案的展示数据：给用户对比用的量化指标 */
+/** 候选方案的展示数据：给用户对比用的量化指标。commuteMinutes 为 null 表示没有任何可用的通勤数据 */
 interface CandidateStats {
   ratingAvg: number
-  commuteMinutes: number
+  commuteMinutes: number | null
   spotCount: number
 }
 
@@ -187,7 +187,12 @@ function statsOf(day: PlannedDay): CandidateStats {
     spots.length > 0
       ? spots.reduce((sum, item) => sum + (item.rating ? Number(item.rating) : 0), 0) / spots.length
       : 0
-  const commuteMinutes = day.items.reduce((sum, item) => sum + (item.commuteMinutes ?? 0), 0)
+  // 只对拿到的通勤数据求和；全是 null（路线查询与估算都失败）时保持 null，
+  // 绝不能当 0 参与「谁更短」的对比——那会得出「通勤 0 分钟」这种虚假结论
+  const known = day.items
+    .map((item) => item.commuteMinutes)
+    .filter((m): m is number => typeof m === 'number')
+  const commuteMinutes = known.length > 0 ? known.reduce((sum, m) => sum + m, 0) : null
   return { ratingAvg, commuteMinutes, spotCount: spots.length }
 }
 
@@ -195,6 +200,7 @@ function statsOf(day: PlannedDay): CandidateStats {
  * 对比两个候选，生成各自的优缺点。
  * 判据只有三个：景点评分、总通勤、景点数——全部来自已验证的数据，
  * 不调模型、不编形容词，用户看到的是可复核的数字。
+ * 任一方案通勤数据缺失时，通勤维度直接不参与对比（宁缺毋错）。
  */
 function buildProsCons(mine: CandidateStats, other: CandidateStats): { pros: string[]; cons: string[] } {
   const pros: string[] = []
@@ -208,12 +214,16 @@ function buildProsCons(mine: CandidateStats, other: CandidateStats): { pros: str
     pros.push(`景点评分与另一案相当（均分 ${mine.ratingAvg.toFixed(1)}）`)
   }
 
-  if (mine.commuteMinutes < other.commuteMinutes - 5) {
-    pros.push(`总通勤更短（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
-  } else if (mine.commuteMinutes > other.commuteMinutes + 5) {
-    cons.push(`总通勤更长（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+  if (mine.commuteMinutes !== null && other.commuteMinutes !== null) {
+    if (mine.commuteMinutes < other.commuteMinutes - 5) {
+      pros.push(`总通勤更短（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+    } else if (mine.commuteMinutes > other.commuteMinutes + 5) {
+      cons.push(`总通勤更长（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+    } else {
+      pros.push(`总通勤与另一案相当（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+    }
   } else {
-    pros.push(`总通勤与另一案相当（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+    cons.push('通勤数据暂缺（路线查询未成功），请以地图实际路线为准')
   }
 
   if (mine.spotCount > other.spotCount) {
@@ -454,8 +464,10 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
        */
       const scoreCandidate = (day: PlannedDay): number => {
         const s = statsOf(day)
-        // 评分权重高一些（用户更在意去的地方好不好），通勤其次
-        return s.ratingAvg * 10 - s.commuteMinutes * 0.5 + s.spotCount * 2
+        // 评分权重高一些（用户更在意去的地方好不好），通勤其次。
+        // 通勤数据缺失按 0（中性）计——打分只决定推荐顺序，采用权在用户手里。
+        const commutePenalty = (s.commuteMinutes ?? 0) * 0.5
+        return s.ratingAvg * 10 - commutePenalty + s.spotCount * 2
       }
 
       const candidateCount = Math.max(1, ctx.parallelCandidates)
@@ -544,7 +556,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
                 cand.day.items.map((item) => item.name).join(' → ') ||
                 `${cand.day.items.length} 个地点（${cand.day.dayType}）`,
               ratingAvg: Number(mine.ratingAvg.toFixed(1)),
-              commuteMinutes: Math.round(mine.commuteMinutes),
+              commuteMinutes: mine.commuteMinutes === null ? null : Math.round(mine.commuteMinutes),
               spotCount: mine.spotCount,
               pros,
               cons,

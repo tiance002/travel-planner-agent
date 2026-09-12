@@ -629,6 +629,10 @@ export async function planRoute(options: PlanRouteOptions): Promise<RouteResult>
     })
 
     const route = json.route?.paths?.[0]
+    // 高德偶发「状态成功但 paths 为空」的响应（实测多出现在限流边缘）。不在这里
+    // 拦住的话，duration 会被解析成 0 还被缓存 5 分钟，下游把整段通勤当成
+    // 0 分钟——候选对比卡上就会出现「通勤约 0 分钟」这种虚假结论。
+    if (!route) throw new RetryableError('路径规划响应里没有路径数据')
     return {
       mode,
       distance: parseNumber(route?.distance) ?? 0,
