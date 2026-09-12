@@ -96,6 +96,11 @@ export interface AgentGraphContext {
    * 默认 false（全自动），保持与手写版一致的行为。
    */
   reviewMode: boolean
+  /**
+   * 并行候选方案数（V4 并行择优）。>1 时同一天并行生成 N 套方案再择优，
+   * 成本随 N 线性增长（每套都是一次完整的模型+高德往返），默认 1 = 关闭。
+   */
+  parallelCandidates: number
 }
 
 // ---------------------------------------------------------------------------
@@ -205,112 +210,243 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   }
 
   // ---- 节点：单天排程 ------------------------------------------------------
+  // V4 回退纠错：排程失败不再抛错中断整张图，而是 catch 后把失败信息写进状态，
+  // 条件边据此决定「重试当前天」还是「放弃继续」。这样模型偶发的格式错误、
+  // 高德偶发的连接中断，都有机会在同一天内自动重试，而不是让用户整趟重来。
+  //
+  // V4 并行择优：ctx.parallelCandidates > 1 时，同一并行生成 N 套候选方案
+  // （各自独立 registry 快照，避免写竞争），再按启发式打分选最优落库。
+  // 默认 1 = 不并行，行为与 V1 完全一致，不增加成本。
   const planDayNode: GraphNode<typeof AgentGraphState> = async (state) => {
     const dayIndex = state.dayIndex
-    const dateKey = addDays(ctx.basics.startDate, dayIndex - 1)
-    const cast = ctx.weatherByDate.get(dateKey) ?? null
 
-    ctx.report(`正在安排第 ${dayIndex}/${state.totalDays} 天`, { force: true })
-    ctx.log(`--- 第 ${dayIndex} 天（${dateKey}）开始 ---`)
+    try {
+      const dateKey = addDays(ctx.basics.startDate, dayIndex - 1)
+      const cast = ctx.weatherByDate.get(dateKey) ?? null
 
-    const anchor = ctx.anchor
-    if (!anchor) throw new Error('住宿锚点尚未确定，无法排程')
+      ctx.report(`正在安排第 ${dayIndex}/${state.totalDays} 天`, { force: true })
+      ctx.log(`--- 第 ${dayIndex} 天（${dateKey}）开始 ---`)
 
-    // ① 工具循环
-    const result = await runToolLoop({
-      credentials: ctx.credentials,
-      systemPrompt: buildDaySystemPrompt(),
-      userPrompt: buildDayUserPrompt({
-        ...ctx.basics,
-        dayIndex,
-        date: dateKey,
-        weatherText: cast
-          ? describeWeather(cast)
-          : '超出预报范围（高德只提供未来约 4 天），请按天气未知处理，不要编造',
-        stay: { poiId: anchor.poiId, name: anchor.name },
-        previousPlaces: state.previousPlaces.slice(-20),
-        previousDayState: state.previousDayState
-          ? { dayType: state.previousDayState.dayType, intensity: state.previousDayState.intensity }
-          : null,
-        usedNightKinds: state.usedNightKinds,
-      }),
-      tools: TOOL_DEFINITIONS,
-      executeTool: (name, args) => runTool(name, args, ctx.toolContext),
-      maxRounds: ctx.maxToolRounds,
-      log: ctx.log,
-    })
+      const anchor = ctx.anchor
+      if (!anchor) throw new Error('住宿锚点尚未确定，无法排程')
 
-    // ② 解析 JSON
-    const raw = await resolvePlanJsonWithRetry(ctx, `day-${dayIndex}`, `第 ${dayIndex} 天`, result)
+      /**
+       * 生成一套候选方案。
+       *
+       * @param registrySnapshot 该候选独立的 POI 登记表（从主表 clone），
+       *   避免并行候选之间写竞争，也让每个候选的选点真正独立。
+       */
+      const generateOneCandidate = async (
+        candidateIndex: number,
+        registrySnapshot: Map<string, Poi>,
+      ): Promise<{ day: PlannedDay; warnings: string[] }> => {
+        const candidateCtx: ToolContext = {
+          ...ctx.toolContext,
+          registry: registrySnapshot,
+          report: (text) => {
+            // 并行时进度会互相穿插，只让 0 号候选上报，避免进度条乱跳
+            if (candidateIndex === 0) ctx.report(text)
+          },
+        }
 
-    // ③ 校验
-    const { day, warnings } = validateDay(raw, ctx.registry, dayIndex, {
-      usedPoiIds: new Set(state.usedPoiIds),
-      ban: ctx.ban,
-      previousDayState: state.previousDayState
-        ? {
-            dayType: state.previousDayState.dayType as DayType,
-            intensity: state.previousDayState.intensity as Intensity,
-          }
-        : null,
-      usedNightKinds: new Set(state.usedNightKinds as NightKind[]),
-    })
-    for (const warning of warnings) ctx.log(`规则修正：${warning}`)
+        // ① 工具循环
+        const result = await runToolLoop({
+          credentials: ctx.credentials,
+          systemPrompt: buildDaySystemPrompt(),
+          userPrompt: buildDayUserPrompt({
+            ...ctx.basics,
+            dayIndex,
+            date: dateKey,
+            weatherText: cast
+              ? describeWeather(cast)
+              : '超出预报范围（高德只提供未来约 4 天），请按天气未知处理，不要编造',
+            stay: { poiId: anchor.poiId, name: anchor.name },
+            previousPlaces: state.previousPlaces.slice(-20),
+            previousDayState: state.previousDayState
+              ? { dayType: state.previousDayState.dayType, intensity: state.previousDayState.intensity }
+              : null,
+            usedNightKinds: state.usedNightKinds,
+          }),
+          tools: TOOL_DEFINITIONS,
+          executeTool: (name, args) => runTool(name, args, candidateCtx),
+          maxRounds: ctx.maxToolRounds,
+          log: (line) =>
+            ctx.log(ctx.parallelCandidates > 1 ? `[候选${candidateIndex + 1}] ${line}` : line),
+        })
 
-    // 住宿地不是游览点，不该出现在条目里
-    day.items = day.items.filter((item) => item.poiId !== anchor.poiId)
-    day.items.forEach((item, index) => {
-      item.orderIndex = index + 1
-    })
+        // ② 解析 JSON
+        const raw = await resolvePlanJsonWithRetry(
+          ctx,
+          `day-${dayIndex}-c${candidateIndex}`,
+          `第 ${dayIndex} 天（候选 ${candidateIndex + 1}）`,
+          result,
+        )
 
-    if (day.items.length === 0) {
-      throw new Error(
-        `第 ${dayIndex} 天没有排出可用的地点。常见原因是目的地过于冷门，或模型凭据余额不足。`,
+        // ③ 校验
+        const { day, warnings } = validateDay(raw, registrySnapshot, dayIndex, {
+          usedPoiIds: new Set(state.usedPoiIds),
+          ban: ctx.ban,
+          previousDayState: state.previousDayState
+            ? {
+                dayType: state.previousDayState.dayType as DayType,
+                intensity: state.previousDayState.intensity as Intensity,
+              }
+            : null,
+          usedNightKinds: new Set(state.usedNightKinds as NightKind[]),
+        })
+
+        // 住宿地不是游览点，不该出现在条目里
+        day.items = day.items.filter((item) => item.poiId !== anchor.poiId)
+        day.items.forEach((item, index) => {
+          item.orderIndex = index + 1
+        })
+
+        if (day.items.length === 0) {
+          throw new Error(
+            `第 ${dayIndex} 天没有排出可用的地点。常见原因是目的地过于冷门，或模型凭据余额不足。`,
+          )
+        }
+
+        return { day, warnings }
+      }
+
+      /**
+       * 启发式打分：通勤越短越好、景点评分越高越好。
+       * 不再调一次模型打分——那要额外烧 token，且启发式对「择优」已经够用。
+       */
+      const scoreCandidate = (day: PlannedDay): number => {
+        const spots = day.items.filter((item) => item.itemType === 'spot')
+        const avgRating =
+          spots.length > 0
+            ? spots.reduce((sum, item) => sum + (item.rating ? Number(item.rating) : 0), 0) /
+              spots.length
+            : 0
+        const totalCommute = day.items.reduce(
+          (sum, item) => sum + (item.commuteMinutes ?? 0),
+          0,
+        )
+        // 评分权重高一些（用户更在意去的地方好不好），通勤其次
+        return avgRating * 10 - totalCommute * 0.5 + spots.length * 2
+      }
+
+      // 并行生成候选（或单个）
+      const candidateCount = Math.max(1, ctx.parallelCandidates)
+      let chosenDay: PlannedDay
+      let chosenWarnings: string[]
+
+      if (candidateCount === 1) {
+        const only = await generateOneCandidate(0, ctx.registry)
+        chosenDay = only.day
+        chosenWarnings = only.warnings
+      } else {
+        ctx.report(`并行生成 ${candidateCount} 套方案后择优`, { force: true })
+        const candidateRegistries = Array.from({ length: candidateCount }, () =>
+          new Map(ctx.registry),
+        )
+        const settled = await Promise.allSettled(
+          candidateRegistries.map((reg, i) => generateOneCandidate(i, reg)),
+        )
+
+        // 打分择优：失败/空方案不参与，全失败才走外层 catch 的重试逻辑
+        const scored = settled
+          .filter((s): s is PromiseFulfilledResult<{ day: PlannedDay; warnings: string[] }> => s.status === 'fulfilled')
+          .map((s) => ({ ...s.value, score: scoreCandidate(s.value.day) }))
+          .sort((a, b) => b.score - a.score)
+
+        if (scored.length === 0) {
+          // 全部候选失败：抛第一个失败原因，走重试/跳过
+          const firstError = settled.find(
+            (s): s is PromiseRejectedResult => s.status === 'rejected',
+          )
+          throw firstError?.reason ?? new Error('所有候选方案都失败了')
+        }
+
+        chosenDay = scored[0].day
+        chosenWarnings = scored[0].warnings
+        ctx.log(
+          `第 ${dayIndex} 天并行 ${settled.length} 套方案，选中第 1 优（评分 ${scored[0].score.toFixed(1)}，` +
+            `其余 ${scored
+              .slice(1)
+              .map((s) => s.score.toFixed(1))
+              .join('、') || '无'}）`,
+        )
+        // 把落选候选的 POI 也登记进主表（它们已通过高德查证，后续天可以复用）
+        for (const reg of candidateRegistries) {
+          for (const [poiId, poi] of reg) ctx.registry.set(poiId, poi)
+        }
+      }
+
+      const day = chosenDay
+
+      // ④ 通勤体检（含住处往返）
+      const commuteWarnings = await optimizeCommute(
+        [day],
+        ctx.registry,
+        (text) => ctx.report(text),
+        new Set(state.usedPoiIds),
+        ctx.ban,
+        anchor,
+        new Set(state.usedNightKinds as NightKind[]),
       )
-    }
+      for (const warning of commuteWarnings) ctx.log(`通勤体检：${warning}`)
+      chosenWarnings = [...chosenWarnings, ...commuteWarnings]
 
-    // ④ 通勤体检（含住处往返）
-    const commuteWarnings = await optimizeCommute(
-      [day],
-      ctx.registry,
-      (text) => ctx.report(text),
-      new Set(state.usedPoiIds),
-      ctx.ban,
-      anchor,
-      new Set(state.usedNightKinds as NightKind[]),
-    )
-    for (const warning of commuteWarnings) ctx.log(`通勤体检：${warning}`)
+      // ⑤ 落库
+      await ctx.persistDay(day, new Date(dateKey), cast)
 
-    // ⑤ 落库
-    await ctx.persistDay(day, new Date(dateKey), cast)
+      // ⑥ 更新传导状态
+      const newPoiIds: string[] = []
+      const newPlaces: string[] = []
+      const newNightKinds: NightKind[] = []
+      for (const item of day.items) {
+        newPoiIds.push(item.poiId)
+        newPlaces.push(item.name)
+        const kind = nightKindOfText(item.name, item.tag)
+        if (kind) newNightKinds.push(kind)
+      }
 
-    // ⑥ 更新传导状态
-    const newPoiIds: string[] = []
-    const newPlaces: string[] = []
-    const newNightKinds: NightKind[] = []
-    for (const item of day.items) {
-      newPoiIds.push(item.poiId)
-      newPlaces.push(item.name)
-      const kind = nightKindOfText(item.name, item.tag)
-      if (kind) newNightKinds.push(kind)
-    }
+      ctx.log(`第 ${dayIndex} 天体裁：${day.dayType}（强度 ${day.intensity}）`)
 
-    ctx.log(`第 ${dayIndex} 天体裁：${day.dayType}（强度 ${day.intensity}）`)
+      await prisma.trip.update({
+        where: { id: ctx.tripId },
+        data: { genDayIndex: dayIndex, genProgress: `第 ${dayIndex}/${state.totalDays} 天已完成` },
+      })
 
-    await prisma.trip.update({
-      where: { id: ctx.tripId },
-      data: { genDayIndex: dayIndex, genProgress: `第 ${dayIndex}/${state.totalDays} 天已完成` },
-    })
+      return {
+        dayIndex: dayIndex + 1,
+        usedPoiIds: newPoiIds,
+        previousPlaces: newPlaces,
+        usedNightKinds: newNightKinds,
+        previousDayState: { dayType: day.dayType, intensity: day.intensity },
+        warnings: chosenWarnings,
+        pendingDaySummary: day.summary || `${day.items.length} 个地点（${day.dayType}）`,
+        dayRetryCount: 0,
+        dayError: null,
+      }
+    } catch (error) {
+      // 回退纠错：把失败记下来，交给条件边决定是否重试。
+      const msg = error instanceof Error ? error.message : String(error)
+      const nextRetry = state.dayRetryCount + 1
+      ctx.log(`第 ${dayIndex} 天排程失败（第 ${nextRetry} 次）：${msg}`)
 
-    return {
-      dayIndex: dayIndex + 1,
-      usedPoiIds: newPoiIds,
-      previousPlaces: newPlaces,
-      usedNightKinds: newNightKinds,
-      previousDayState: { dayType: day.dayType, intensity: day.intensity },
-      warnings: commuteWarnings,
-      // 供 review 模式展示给用户确认：一句话概括这一天的安排
-      pendingDaySummary: day.summary || `${day.items.length} 个地点（${day.dayType}）`,
+      if (nextRetry > MAX_DAY_RETRIES) {
+        // 重试次数用尽：放弃这一天的剩余地点，推进到下一天，避免死循环。
+        // 这一天没有落库（persistDay 没执行），所以用户看到的行程里这一天是空的，
+        // 但至少不会卡住整趟生成。
+        ctx.log(`第 ${dayIndex} 天连续失败 ${MAX_DAY_RETRIES} 次，跳过这一天继续`)
+        return {
+          dayIndex: dayIndex + 1,
+          dayRetryCount: 0,
+          dayError: null,
+          warnings: [`第 ${dayIndex} 天连续失败已跳过：${msg}`],
+        }
+      }
+
+      // 未超限：dayIndex 不变，重试同一天
+      return {
+        dayRetryCount: nextRetry,
+        dayError: msg,
+      }
     }
   }
 
@@ -345,11 +481,20 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   }
 
   // ---- 条件边 --------------------------------------------------------------
-  // reviewDay 之后：还有下一天就回到 planDay，否则 finalize
+  // reviewDay 之后路由。优先级：
+  //   1. 当前天失败（dayError 非空）→ 回 planDay 重试（dayIndex 未推进，
+  //      重排同一天；超限时 planDay 内部已自行跳过并推进 dayIndex）
+  //   2. 还有下一天 → planDay
+  //   3. 全部排完 → finalize
+  //
+  // V4 回退是「重试当前天」而非「回退到前一天」：回退前一天会覆盖已落库、
+  // 用户可能已确认的结果，风险高收益低；重试当前天已能兜住绝大多数偶发失败。
+  const MAX_DAY_RETRIES = 2
   const shouldContinue: ConditionalEdgeRouter<{
     InputSchema: typeof AgentGraphState
     Nodes: 'planDay' | 'finalize'
   }> = (state) => {
+    if (state.dayError) return 'planDay'
     return state.dayIndex <= state.totalDays ? 'planDay' : 'finalize'
   }
 

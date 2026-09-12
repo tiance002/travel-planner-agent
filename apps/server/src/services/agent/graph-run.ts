@@ -167,6 +167,8 @@ export async function generateTripWithGraph(
     persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
     reviewMode,
+    // V4 并行择优：环境变量可开，默认 1（不并行，成本与手写版一致）
+    parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
   }
 
   // 构建图（闭包捕获 ctx），驱动执行。
@@ -191,6 +193,8 @@ export async function generateTripWithGraph(
         warnings: [],
         finished: false,
         pendingDaySummary: null,
+        dayRetryCount: 0,
+        dayError: null,
       },
       config,
     )
@@ -296,6 +300,8 @@ export async function resumeTripReview(tripId: string): Promise<void> {
     persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
     reviewMode: true,
+    // 恢复路径沿用与首次生成相同的并行配置
+    parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
   }
 
   const graph = buildAgentGraph(ctx, getCheckpointer())

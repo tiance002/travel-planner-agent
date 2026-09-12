@@ -65,6 +65,17 @@ export const AgentGraphState = new StateSchema({
    * 标量字符串，覆盖式。null 表示没有待确认的摘要。
    */
   pendingDaySummary: z.string().nullable(),
+  /**
+   * 当前这一天的连续失败次数（V4 回退纠错用）。
+   * planDay 排程失败时不抛错，而是把失败信息记下来、这个计数 +1；
+   * 条件边据此决定「重试当前天」还是「放弃并继续」。覆盖式。
+   */
+  dayRetryCount: z.number().int().min(0),
+  /**
+   * 当前这一天的失败信息。非 null 表示这一天的排程遇到了问题（V4 回退纠错）。
+   * 覆盖式。
+   */
+  dayError: z.string().nullable(),
 })
 
 /** 从图状态里取字段的类型，供节点函数标注参数 */

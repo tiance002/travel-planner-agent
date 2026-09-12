@@ -195,6 +195,91 @@ const rv2 = await reviewGraph.invoke(new Command({ resume: 'approved' }), review
 check('resume 后 decision 回填到节点', rv2.summary, 'confirmed:approved')
 
 // ---------------------------------------------------------------------------
+// 测试 6：回退纠错（V4）——失败时重试当前天，超限后跳过推进
+// ---------------------------------------------------------------------------
+
+console.log('\n--- 回退纠错：失败重试与跳过推进 ---')
+
+const RetryState = new StateSchema({
+  dayIndex: z.number(),
+  totalDays: z.number(),
+  dayRetryCount: z.number().int().min(0),
+  dayError: z.string().nullable(),
+  visited: new ReducedValue(z.array(z.string()), { reducer: (a, b) => [...a, ...b] }),
+})
+
+/**
+ * 用假节点模拟真实 planDay 的完整行为：
+ *   - 失败时 retryCount+1；重试未超限（MAX=2）就重试同一天
+ *   - 超限（第 3 次失败）自行跳过：dayIndex+1、清空 dayError
+ *   - 成功推进下一天
+ * 这样与真实节点行为一致，验证的是「条件边路由」而非测试桩本身。
+ */
+function buildRetryGraph(mode: 'fails-then-succeeds' | 'always-fails') {
+  const attemptCounter = new Map<number, number>()
+  const MAX = 2
+  return new StateGraph(RetryState)
+    .addNode('planDay', async (state) => {
+      attemptCounter.set(state.dayIndex, (attemptCounter.get(state.dayIndex) ?? 0) + 1)
+      const n = attemptCounter.get(state.dayIndex) ?? 0
+      const shouldFail = mode === 'always-fails' ? true : n < 2
+      if (shouldFail) {
+        const nextRetry = state.dayRetryCount + 1
+        if (nextRetry > MAX) {
+          // 超限跳过：与真实 planDay 的 catch 分支一致
+          return {
+            dayIndex: state.dayIndex + 1,
+            dayRetryCount: 0,
+            dayError: null,
+            visited: [`skip-${state.dayIndex}`],
+          }
+        }
+        return {
+          dayRetryCount: nextRetry,
+          dayError: `第 ${nextRetry} 次失败`,
+          visited: [`fail-${state.dayIndex}-${n}`],
+        }
+      }
+      return {
+        dayIndex: state.dayIndex + 1,
+        dayRetryCount: 0,
+        dayError: null,
+        visited: [`ok-${state.dayIndex}`],
+      }
+    })
+    .addNode('finalize', async (state) => ({ visited: ['finalized'] }))
+    .addEdge(START, 'planDay')
+    .addConditionalEdges('planDay', (state) => (state.dayError ? 'planDay' : state.dayIndex <= state.totalDays ? 'planDay' : 'finalize'), ['planDay', 'finalize'])
+    .addEdge('finalize', END)
+    .compile()
+}
+
+// 用例 A：每天「前两次失败、第三次成功」→ 两天各重试 2 次后都成功推进
+const ra = await buildRetryGraph('fails-then-succeeds').invoke({
+  dayIndex: 1,
+  totalDays: 2,
+  dayRetryCount: 0,
+  dayError: null,
+  visited: [],
+})
+// day1 成功 → dayIndex=2；day2 成功 → dayIndex=3
+check('重试后成功推进到最后一天的下一天', ra.dayIndex, 3)
+check('失败记录被清空', ra.dayError, null)
+check('两天各自成功了一次', ra.visited.filter((v) => v.startsWith('ok')).length, 2)
+
+// 用例 B：永远失败 → 每天超限（2 次重试）后跳过推进，最终两天都被跳过
+const rb = await buildRetryGraph('always-fails').invoke({
+  dayIndex: 1,
+  totalDays: 2,
+  dayRetryCount: 0,
+  dayError: null,
+  visited: [],
+})
+check('连续失败超限后跳过推进（不死循环）', rb.dayIndex, 3)
+check('跳过时 dayError 已清空', rb.dayError, null)
+check('每天各跳过一次', rb.visited.filter((v) => v.startsWith('skip')).length, 2)
+
+// ---------------------------------------------------------------------------
 // 汇总
 // ---------------------------------------------------------------------------
 
