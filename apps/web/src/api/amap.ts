@@ -92,15 +92,6 @@ export async function geocode(address: string, city?: string): Promise<GeocodeRe
   return data.result
 }
 
-/** 经纬度反查地址 */
-export async function regeocode(lng: number, lat: number) {
-  const { data } = await api.get<{ result: { formattedAddress: string; city: string; district: string; adcode: string } }>(
-    '/amap/regeo',
-    { params: { lng, lat } },
-  )
-  return data.result
-}
-
 /** POI 关键字搜索 */
 export async function searchPoiText(params: {
   keywords: string
@@ -110,21 +101,6 @@ export async function searchPoiText(params: {
   pageNum?: number
 }): Promise<Poi[]> {
   const { data } = await api.get<{ pois: Poi[] }>('/amap/poi/text', { params })
-  return data.pois
-}
-
-/** POI 周边搜索，结果带 distance 字段 */
-export async function searchPoiAround(params: {
-  lng: number
-  lat: number
-  keywords?: string
-  types?: string
-  radius?: number
-  sortRule?: 'distance' | 'weight'
-  pageSize?: number
-  pageNum?: number
-}): Promise<Poi[]> {
-  const { data } = await api.get<{ pois: Poi[] }>('/amap/poi/around', { params })
   return data.pois
 }
 

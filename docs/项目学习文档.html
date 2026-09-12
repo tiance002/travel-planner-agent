@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅游助手 · 项目全景学习文档</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  :root{
+    --ink:#3d3527; --paper:#fbf7ec; --card:#fffdf6; --accent:#b5651d;
+    --green:#2e7d32; --red:#c62828; --blue:#1565c0; --line:#e5ddc8;
+  }
+  *{box-sizing:border-box}
+  body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;background:var(--paper);color:var(--ink);margin:0;line-height:1.85;font-size:15px}
+  .wrap{max-width:960px;margin:0 auto;padding:24px 28px 80px}
+  h1{font-size:30px;border-bottom:3px solid var(--accent);padding-bottom:12px;margin-bottom:6px}
+  .subtitle{color:#8a7d5f;font-size:14px;margin-bottom:30px}
+  h2{font-size:22px;margin-top:52px;padding-left:12px;border-left:5px solid var(--accent);background:linear-gradient(90deg,#f3ecd8,transparent)}
+  h3{font-size:17px;margin-top:28px;color:#6b4f2a}
+  h4{font-size:15px;margin-top:20px}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px;background:#fff}
+  th{background:#f0e8d2;text-align:left}
+  th,td{border:1px solid var(--line);padding:7px 10px;vertical-align:top}
+  code{background:#f0ead6;padding:1px 6px;border-radius:3px;font-family:Consolas,monospace;font-size:13px;word-break:break-all}
+  pre{background:#2f2a20;color:#f5efdd;padding:14px 16px;border-radius:8px;overflow-x:auto;font-size:12.5px;line-height:1.7}
+  pre code{background:none;color:inherit;padding:0}
+  .toc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 24px;margin:20px 0}
+  .toc a{color:#6b4f2a;text-decoration:none;display:block;padding:2px 0}
+  .toc a:hover{color:var(--accent)}
+  .box{border-radius:8px;padding:12px 16px;margin:14px 0;font-size:14px}
+  .def{background:#eef4fb;border-left:4px solid var(--blue)}
+  .def b{color:var(--blue)}
+  .warn{background:#fdf0ee;border-left:4px solid var(--red)}
+  .warn b{color:var(--red)}
+  .good{background:#eef7ee;border-left:4px solid var(--green)}
+  .good b{color:var(--green)}
+  .tip{background:#fdf6e3;border-left:4px solid var(--accent)}
+  .flow{background:#fff;border:1px solid var(--line);border-radius:10px;padding:20px;margin:16px 0;overflow-x:auto}
+  .frow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .fnode{background:#f7f1de;border:1.5px solid #c9b98a;border-radius:8px;padding:6px 12px;font-size:13px;white-space:nowrap}
+  .fnode.decision{background:#e8f0fa;border-color:#8fb0d9}
+  .fnode.end{background:#e9f5e9;border-color:#94c795}
+  .fnode.risk{background:#fbeae6;border-color:#dda08f}
+  .farrow{color:#a08a55;font-weight:bold}
+  .kbd{display:inline-block;background:#efe8d4;border:1px solid #d4c69c;border-radius:4px;padding:0 6px;font-size:12px}
+  .num{display:inline-block;background:var(--accent);color:#fff;border-radius:50%;width:22px;height:22px;text-align:center;line-height:22px;font-size:13px;margin-right:8px;flex:none}
+  .err-item{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:10px 0;font-size:13.5px}
+  .err-item h4{margin:0 0 6px;color:var(--red)}
+  .err-item .cause{color:#7a5c2e}
+  .prompt-block{background:#fffbe8;border:2px dashed var(--accent);border-radius:10px;padding:18px 20px;font-size:13.5px;white-space:pre-wrap;line-height:1.9;font-family:inherit}
+  .chart{width:100%;height:340px;background:#fff;border:1px solid var(--line);border-radius:10px;margin:14px 0}
+  ul{padding-left:22px;margin:8px 0}
+  li{margin:4px 0}
+  .small{font-size:12.5px;color:#93876a}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>旅游助手 · 项目全景学习文档</h1>
+<div class="subtitle">AI Agent 旅游规划 Web 应用 · 从需求到落地的完整复盘 · 更新于 2026-09-12</div>
+
+<div class="box def"><b>这个文档是什么：</b>一份让零基础读者也能把握<b>整个项目框架与全部关键细节</b>的学习文档。它记录了需求如何一步步明确、用了哪些技术、用户输入之后系统内部发生了什么、行程是怎么排出来的、数据存在哪里、踩过哪些坑、怎么解决的。最后一章给出一段「复刻提示词」——理论上把它发给一个足够强的 AI，就能一次请求重建整个项目。</div>
+
+<div class="toc">
+<b>目录</b>
+<a href="#c1">一、需求演进史：从一句话到 15 个版本</a>
+<a href="#c2">二、全景流程：一张图看懂整个系统</a>
+<a href="#c3">三、技术栈：每一项是什么、为什么选它、怎么用的</a>
+<a href="#c4">四、用户输入之后发生了什么（四步向导逐拆）</a>
+<a href="#c5">五、核心：AI 是怎么排行程的（LangGraph 图编排）</a>
+<a href="#c6">六、数据是怎么存放的（表结构、大小、加密、缓存）</a>
+<a href="#c7">七、前端功能实现细节（打卡 / 换一个 / 主题 / 布局）</a>
+<a href="#c8">八、错误编年史：26 个真实踩坑与解决措施</a>
+<a href="#c9">九、错误处理哲学：三条原则</a>
+<a href="#c10">十、一次请求复刻整个项目的提示词</a>
+</div>
+
+<!-- ==================== 1 ==================== -->
+<h2 id="c1">一、需求演进史：从一句话到 15 个版本</h2>
+
+<p><b>原始需求只有一句话</b>：「做一个 AI 旅游规划应用，用户输入目的地和天数，AI 帮忙排行程，能看地图、能打卡。」——这句话离能落地还差得远，之后经历了 15 轮「提出 → 实现 → 发现问题 → 重新明确」的循环。把这条演进线记下来，比记最终代码更重要，因为它展示了真实需求是怎么长出来的。</p>
+
+<table>
+<tr><th style="width:110px">阶段</th><th>提出 / 明确的需求</th><th>影响的设计决策</th></tr>
+<tr><td><b>原始需求</b></td><td>AI 排行程 + 地图 + 打卡</td><td>确定要做 Web 应用</td></tr>
+<tr><td>P1–P3</td><td>登录注册、新建行程向导、生成行程</td><td>用户名+密码登录；四步向导雏形</td></tr>
+<tr><td>P3 明确</td><td><b>砍掉 Electron 桌面封装</b>，纯网页；第一版<b>只做中国境内单城市</b></td><td>砍掉跨平台打包；地图服务选定高德（境内唯一合规选项之一）</td></tr>
+<tr><td>P4</td><td>模型接入方式：用户自带 API Key（BYOK）</td><td>服务端持有主密钥加密存储用户的 Key；只支持「OpenAI 兼容接口」</td></tr>
+<tr><td>P4 决策</td><td>住宿地点作为<b>锚点</b>排行程；允许「还没定住宿」</td><td>没定住宿时由 AI 推荐交通便利的中心区域当锚点</td></tr>
+<tr><td>P4 决策</td><td>每日景点上限 3 个；<b>不计算游览时长</b></td><td>时间轴降级为「时段分组顺序列表」，排不出具体钟点就分组展示</td></tr>
+<tr><td>P5 决策</td><td><b>坐标铁律</b>：地图坐标只准来自高德 POI 返回值，模型绝不编造经纬度</td><td>建立 POI 登记表 registry，行程只准引用登记过的地点</td></tr>
+<tr><td>P6 决策</td><td>两套高德 Key 分开（前端 JS Key / 后端 Web Key），后端代理绝不暴露 Web Key</td><td><code>/api/amap/*</code> 代理层 + 缓存限流</td></tr>
+<tr><td>P7 决策</td><td>到点打卡：手动按钮，未打卡空心 / 已打卡实心+对勾+置灰，默认只显示当天</td><td>TripItem 增加 checkedAt 字段</td></tr>
+<tr><td>P8</td><td>「换一个」候选替换；行程卡片标签化</td><td>半径梯度 1500/3000/5000m 搜同类候选，按两段通勤之和排序取前 6</td></tr>
+<tr><td>P8 决策</td><td><b>选点准入硬规则</b>：景点评分 &lt; 4 直接剔除、餐厅放宽 3.5、<b>评分缺失一律放行</b>（否则误杀免费公园）</td><td>纯函数规则层 spot-rules.ts，可单测</td></tr>
+<tr><td>P8 决策</td><td>营业时间必须与所排时段对得上（重叠 ≥ 60 分钟）；「到达后剩余 &lt; 3.5 小时」只提示仓促不剔除；<b>餐厅完全不校验</b></td><td>高德营业时间数据最不准，硬卡会卡死行程</td></tr>
+<tr><td>P8 决策</td><td>行程体裁五种：normal / theme_park / hike / night_hike / recovery；夜爬次日强制恢复日</td><td>规则表优先 + 模型提议兜底 + <b>统一过黑名单拦截</b>（否则模型提议路径绕过用户约束）</td></tr>
+<tr><td>P9</td><td>纸质手帐主题：书签列表、线圈本、便利贴、胶带；白天棕 / 黑夜灰</td><td>全局 token 承载纸质感，不逐页写背景色</td></tr>
+<tr><td>P9 反馈</td><td>书签太窄（加厚到 5/3 = 91px）、便利贴改恒为浅底深墨、去掉悬停晃动、设置页字段居中</td><td>发现并修复「底色读 DOM、墨色读 React 状态」的一帧错位（浅底配浅字）</td></tr>
+<tr><td>P10</td><td>滚动条抖动、下拉带动整页滚动 → scrollbar-gutter + overscroll-behavior；表单限高内滚</td><td>布局策略定型：「外壳固定 + 内容区内滚」</td></tr>
+<tr><td>P11–P15</td><td>用户主动要求：<b>用 LangGraph 重写编排</b> + 多版本迭代；逐天确认要能<b>驳回并给意见</b>；并行择优要<b>两案对比由用户挑</b>；通勤要<b>分驾车/公交</b>两种；候选通勤不能是 0；删除手写版</td><td>LangGraph V1–V5；genReview/genDecisions 字段；amap 层三处修复；最终单路径</td></tr>
+</table>
+
+<div class="box tip"><b>规律总结：</b>几乎所有后来的复杂度都源自两类反馈——①<b>数据不可信</b>（评分缺失、营业时间乱、路线查询偶发失败），于是建了一层层「宁缺毋错」的防御；②<b>用户要掌控权</b>（换一个、确认/驳回、两案挑选），于是把全自动流程改造成了人机协作。</div>
+
+<!-- ==================== 2 ==================== -->
+<h2 id="c2">二、全景流程：一张图看懂整个系统</h2>
+
+<div class="flow">
+  <h4 style="margin-top:0">整体链路（从用户打开网页到看到行程）</h4>
+  <div class="frow">
+    <span class="fnode">注册 / 登录<br><span class="small">用户名+密码 · JWT</span></span><span class="farrow">→</span>
+    <span class="fnode">设置页填模型 Key<br><span class="small">BYOK · AES-256-GCM 加密入库</span></span><span class="farrow">→</span>
+    <span class="fnode">新建行程 第1步<br><span class="small">城市→adcode · 日期天数偏好预算</span></span><span class="farrow">→</span>
+    <span class="fnode">第2步 内嵌高德地图<br><span class="small">选住宿 or AI 推荐锚点</span></span><span class="farrow">→</span>
+    <span class="fnode">第3步 点「生成」<br><span class="small">可勾选：逐天确认 / 并行择优</span></span>
+  </div>
+  <div class="frow"><span class="farrow">↓ 服务端后台运行（接口立刻返回 202，前端每 2.5 秒轮询进度）</span></div>
+  <div class="frow">
+    <span class="fnode decision">LangGraph 图编排</span><span class="farrow">→</span>
+    <span class="fnode">resolveAnchor<br><span class="small">未选住宿时 AI 定锚点</span></span><span class="farrow">→</span>
+    <span class="fnode">planDay（逐天循环）<br><span class="small">模型带工具取数→解析→规则校验→通勤体检</span></span><span class="farrow">→</span>
+    <span class="fnode decision">reviewDay<br><span class="small">交互模式：interrupt 等用户裁决</span></span><span class="farrow">→</span>
+    <span class="fnode end">finalize 落库 ready</span>
+  </div>
+  <div class="frow">
+    <span class="farrow">↳ 失败？</span>
+    <span class="fnode risk">条件边：自动重试 2 次 → 超限跳过该天（不卡死整趟）</span>
+    <span class="farrow">↳ 驳回？</span>
+    <span class="fnode risk">意见注入提示词 → 重排同一天</span>
+  </div>
+  <div class="frow"><span class="farrow">↓</span></div>
+  <div class="frow">
+    <span class="fnode end">第4步 查看行程</span><span class="farrow">→</span>
+    <span class="fnode">线圈本时间轴 + 地图路线联动</span><span class="farrow">→</span>
+    <span class="fnode">每个地点「换一个」</span><span class="farrow">→</span>
+    <span class="fnode end">到点打卡（手动）</span>
+  </div>
+</div>
+
+<div class="box def"><b>一句话架构：</b>前端 React 单页应用 ↔ Express 后端（业务+代理）↔ 三样外部能力（高德数据、OpenAI 兼容模型、SQLite/Postgres 数据库）。模型自己<b>不产生任何事实数据</b>——它只决定「去哪、怎么串」，所有坐标、评分、营业时间、路线都由代码去调高德接口拿。</div>
+
+<!-- ==================== 3 ==================== -->
+<h2 id="c3">三、技术栈：每一项是什么、为什么选它、怎么用的</h2>
+
+<h3>3.1 前端</h3>
+<table>
+<tr><th style="width:170px">技术</th><th>一句话定义 + 类比</th><th>在本项目怎么用</th></tr>
+<tr><td><b>React 19.3</b></td><td>前端框架，负责「数据变了界面自动跟着变」。类比：你只管改台账，黑板自动重抄。<div class="small">注意 Hook 铁律：所有 use 开头的函数必须放在任何提前 return 之前，否则白屏（踩过，见第八章）。</div></td><td>全部页面组件；状态用 useState/useRef；生成进度用 setTimeout 轮询（每 2.5 秒问一次后端，而不是挂一个长请求）</td></tr>
+<tr><td><b>Vite 8</b></td><td>前端开发服务器+打包器。类比：开发时现做现上的后厨，打包时才备整桌菜。</td><td><code>npm run dev</code> 一键起前后端；注意它默认绑 localhost（IPv6），必须用 <code>localhost:5173</code> 访问而非 127.0.0.1</td></tr>
+<tr><td><b>Ant Design 6.6</b></td><td>现成的 React 组件库（按钮/表格/弹窗都造好了）。类比：宜家家具，买回来组装不用自己刨木头。</td><td>表单、卡片、抽屉、消息提示。坑：v6 大量 API 改名（Alert 的 message→title、Space 的 direction→orientation），每加新组件跑一次 smoke 能抓到弃用警告</td></tr>
+<tr><td><b>react-router-dom 7</b></td><td>页面路由：根据网址决定显示哪个页面。类比：大厦楼层索引。</td><td>登录/行程列表/新建/详情/设置五个页面</td></tr>
+<tr><td><b>dayjs</b></td><td>轻量日期处理库</td><td>出发日期、按天算日期（addDays）</td></tr>
+</table>
+
+<h3>3.2 后端</h3>
+<table>
+<tr><th style="width:170px">技术</th><th>一句话定义 + 类比</th><th>在本项目怎么用</th></tr>
+<tr><td><b>Node.js 22/24 + TypeScript</b></td><td>让 JS 跑在服务器上的运行时；TypeScript 是带类型标注的 JS，写错字段名编译期就报错</td><td>整个后端都是 TS；前端也用 TS</td></tr>
+<tr><td><b>Express 5.2</b></td><td>后端 Web 框架，把「网址→处理函数」组织起来。类比：餐厅前台，按单号分单。</td><td>所有 REST 接口：/api/auth、/api/trips、/api/amap、/api/settings；JWT 中间件做登录校验</td></tr>
+<tr><td><b>Prisma 7.10</b></td><td>ORM——用「对象」操作数据库而不用手写 SQL。类比：你跟仓库管理员说人话，他去搬货。</td><td>5 张表（见第六章）。注意 Prisma 7 三个非常规约定：①连接串不在 schema 里而在 prisma.config.ts；②客户端必须传 libsql 适配器；③CLI 必须钉 7.10.0（npm 的 latest 标签被上游指向 8.0 预发布版）</td></tr>
+<tr><td><b>SQLite(libSQL) → Postgres</b></td><td>数据库：一个文件就是一个库（开发期），上线换 PostgreSQL</td><td>开发期零部署成本；用 @libsql/client 适配器（平台预编译包，规避了 better-sqlite3 那类本地编译问题——但 LangGraph 的 checkpointer 仍依赖它，见第八章）</td></tr>
+<tr><td><b>jsonwebtoken(JWT)</b></td><td>登录凭证：签一张防伪门票给前端，之后每次请求带上。</td><td>登录成功签发 token；中间件校验；修改用户名后旧 token 自动换新</td></tr>
+<tr><td><b>zod 4.6</b></td><td>入参校验器：请求体字段对不对、类型对不对，它说了算。类比：机场安检。</td><td>所有 POST 接口的 body 校验；也是 LangGraph 状态字段的定义方式</td></tr>
+</table>
+
+<h3>3.3 AI 与地图（本项目灵魂）</h3>
+<table>
+<tr><th style="width:170px">技术</th><th>一句话定义 + 类比</th><th>在本项目怎么用</th></tr>
+<tr><td><b>OpenAI 兼容接口（BYOK）</b></td><td>用户自己填模型地址和 Key（DeepSeek/通义等都兼容这套协议）。类比：手机不锁运营商，插谁的卡打谁的网。</td><td>设置页填 baseUrl/modelName/apiKey；服务端用 AES-256-GCM 加密后入库，绝不明文存储；每次生成实时解密取用</td></tr>
+<tr><td><b>@langchain/langgraph 1.4.15</b></td><td>用「图（节点+边）」组织 AI 工作流的编排框架。类比：把 while 循环升级成一张可视化的流程图，且图能自动存档断点、能在任意节点暂停等人。</td><td>整个生成编排：StateSchema 定义状态、三个主节点+条件边、interrupt 实现人工裁决、SQLite checkpointer 实现断点续跑。版本必须 --save-exact 钉死 1.4.15</td></tr>
+<tr><td><b>高德开放平台（Web 服务 API）</b></td><td>中国境内合规的地图数据源：地点搜索、路线规划、天气、地理编码。</td><td>模型可调的 5 个工具的底层（见 5.2）；前端 JS API 渲染地图；所有坐标唯一来源</td></tr>
+<tr><td><b>进程内 TTL 缓存</b></td><td>把接口结果在内存里存一段时间，期内重复请求直接复用。类比：把常用菜抄在小黑板上，不用每次问后厨。</td><td>地理编码 24h / POI 10min / 天气 30min / 路线 5min；同一时刻的相同请求做并发合并（只发一次真请求）；是控制高德配额与 QPS 限流的第一道防线</td></tr>
+</table>
+
+<div class="box warn"><b>依赖铁律：</b>能用平台预编译包就不引入需要本地编译的原生模块（better-sqlite3 是本项目唯一被迫引入的，它按 Node 大版本绑定二进制——Node 22 编译的产物在 Node 24 下直接加载失败，升级 Node 后必须 <code>npm rebuild better-sqlite3</code>）。关键依赖一律 <code>--save-exact</code> 钉死版本。</div>
+
+<!-- ==================== 4 ==================== -->
+<h2 id="c4">四、用户输入之后发生了什么（四步向导逐拆）</h2>
+
+<h3>第 1 步：基本信息</h3>
+<p><span class="num">1</span><b>目的地城市 → adcode</b>。用户输入「杭州」这样的城市名，但高德的 POI 检索、天气查询要的是 <b>6 位行政区划编码（adcode）</b>。所以输入框失焦后立即调高德地理编码接口：既拿到编码，又拿到城市中心坐标（供地图初始定位）。这一步是强制的——<b>只拿城市名是查不准的</b>。</p>
+<p><span class="num">2</span><b>日期 / 天数（1-7）/ 人数 / 偏好多选（亲子、美食、文化…）/ 预算（人均或总价）/ 额外需求多选</b>。额外需求不只是文案——里面的「不含爬山」「不含主题乐园」「不含夜爬」「节奏轻松些」会被 <code>parseDayTypeBan()</code> 解析成<b>结构化黑名单</b>，在代码层硬性拦截，不依赖模型自觉。</p>
+
+<h3>第 2 步：地图选住宿（锚点）</h3>
+<p><span class="num">3</span>页面内嵌高德 JS 地图（前端 Key），搜索酒店、点选一家，坐标存进 Trip 表。也可以选「还没定住宿」——此时图编排的第一个节点 resolveAnchor 会让模型调工具挑一个交通便利的中心区域，<b>并把理由写进决策记录</b>。锚点是整趟行程的地理中心：每天从住处出发、晚上回住处。</p>
+
+<h3>第 3 步：生成行程</h3>
+<p><span class="num">4</span>两个开关：<b>逐天人工确认</b>（每排完一天暂停等确认/驳回）和<b>并行择优</b>（每天并行两套方案供挑选，卡上明确提示「消耗与耗时约翻倍」）。点生成后：</p>
+<ul>
+<li>后端把 Trip 状态置为 generating，<b>立刻返回 202</b>，真正的生成在后台异步跑；</li>
+<li>若该行程 10 分钟内已在生成中，返回 409 拒绝重复触发（STALE_GENERATING_MS = 10 分钟，防止卡死状态无法重试）；</li>
+<li>前端进入轮询：每 2.5 秒 GET 一次行程详情，把 genProgress（进度文案）、genReview（待确认卡片载荷）、genDayIndex（已完成天数）渲染出来；</li>
+<li>期间可以关页面，生成在服务端继续；每天排完立即落库，失败可从断点继续。</li>
+</ul>
+
+<h3>第 4 步：查看与打卡</h3>
+<p>左列线圈本时间轴（时段分组：上午 1 个景点 + 餐饮，下午至晚上 1-2 个），右列高德地图画真实驾车路线（含住处往返闭环）。每个地点可点「换一个」，可手动打卡。</p>
+
+<!-- ==================== 5 ==================== -->
+<h2 id="c5">五、核心：AI 是怎么排行程的</h2>
+
+<h3>5.1 先建立三个心智模型</h3>
+<div class="box def"><b>模型（LLM）是什么角色：</b>一个「会读题、会打电话查资料的参谋」，<b>不是数据库</b>。它负责理解需求、决定去哪怎么串；但每一家的坐标、评分、营业时间、车程，都必须由代码调高德接口获取。为什么？因为模型会「编」——它见过无数篇游记，能流利地写出一个不存在的店名和看似合理的坐标，地图上一画就飘到海里。<b>本项目铁律：坐标只准来自高德 POI 返回值。</b>实现方式是 POI 登记表（registry，一个 Map）：工具每查到一个地点就登记入册，行程条目只准引用册内的 poiId。</div>
+<div class="box def"><b>工具调用（tool calling）是什么：</b>让模型能「打电话」的机制。我们把高德接口包装成 5 个工具（见下表），在提示词里告诉模型「你有这些电话可打」。模型输出「我要打 search_poi，参数是杭州、景点」——由代码真正执行后把结果喂回给它，如此往复直到它交出最终方案。类比：参谋自己不出门，但桌上有五部内线电话。</div>
+<div class="box def"><b>图编排（LangGraph）是什么：</b>把「先干什么再干什么、失败怎么办、何时等人」画成一张节点+边的图，由框架驱动执行并自动存档。相比手写 while 循环，它白送三样东西：①<b>检查点</b>——每个节点跑完自动快照，进程崩了从断点恢复而不是从头再来；②<b>interrupt</b>——任意节点可以暂停等人类输入再继续；③<b>条件边</b>——「重试还是放弃」用图的走向表达而不是层层 if。</div>
+
+<h3>5.2 模型的 5 部内线电话（工具清单）</h3>
+<table>
+<tr><th>工具</th><th>功能</th><th>关键细节</th></tr>
+<tr><td><code>search_poi</code></td><td>按关键词/类别搜地点</td><td>必须传 <code>show_fields=business,photos</code> 才拿得到评分、人均、营业时间、照片——v5 接口不声明就不返回（transit 接口漏传 show_fields=cost 曾导致耗时恒为 0，见第八章）</td></tr>
+<tr><td><code>search_nearby</code></td><td>在某点周边搜（换点候选、找餐厅）</td><td>带直线距离；换点时按半径梯度 1500→3000→5000 米逐级放宽</td></tr>
+<tr><td><code>get_route</code></td><td>两点间真实路线</td><td><code>show_fields=cost,polyline</code>；驾车给通勤分钟与折线（画地图）；公交给公共交通耗时；<b>响应无 paths 时必须当错误抛出重试</b>，否则解析成 0 且被缓存 5 分钟</td></tr>
+<tr><td><code>get_weather</code></td><td>天气预报</td><td>高德只有约 4 天预报，超出窗口返回空数组——提示词明确告知模型「按天气未知处理，不要编造」</td></tr>
+<tr><td><code>get_city_center</code></td><td>城市中心坐标</td><td>锚点推荐时定位用</td></tr>
+</table>
+<p>单天工具循环上限 <code>MAX_DAY_TOOL_ROUNDS = 14</code> 轮——防止模型陷入「查了又查、不给结果」的死循环；超限抛错进入重试。</p>
+
+<h3>5.3 一天的生成流程（planDay 节点内部）</h3>
+<div class="flow">
+<div class="frow"><span class="num">1</span><span class="fnode">组装提示词：需求+日期天气+住处+近 20 个去过的地名+昨天体裁强度+已用夜生活类别（+用户驳回意见，若有）</span></div>
+<div class="frow"><span class="num">2</span><span class="fnode">模型带工具循环（≤14 轮），期间真正调高德查地点/路线</span></div>
+<div class="frow"><span class="num">3</span><span class="fnode">解析 JSON（失败则带着错误信息让模型重答一次，再失败才抛错）</span></div>
+<div class="frow"><span class="num">4</span><span class="fnode decision">规则校验 validateDay：评分门槛 / 营业时间 / 黑名单 / 跨天去重 / 夜生活类别 / 天型传导</span></div>
+<div class="frow"><span class="num">5</span><span class="fnode">通勤体检 optimizeCommute：逐段真实驾车时间，&gt;40 分钟自动换点；公交估算并行获取</span></div>
+<div class="frow"><span class="num">6</span><span class="fnode">交互模式：挂起等裁决 → commitDay 落库；全自动：直接 commitDay</span></div>
+</div>
+
+<h3>5.4 硬约束清单（全部真实数值，代码层强制）</h3>
+<table>
+<tr><th>约束</th><th>规则</th><th>为什么这么定</th></tr>
+<tr><td>坐标来源</td><td>只准引用 POI 登记表内的 poiId，模型绝不提供坐标</td><td>模型编坐标会飘到海里</td></tr>
+<tr><td>评分门槛</td><td>景点 <b>&lt; 4</b> 剔除；餐厅 <b>&lt; 3.5</b>；<b>评分缺失(null)一律放行</b></td><td>免费公园大多无评分，硬卡会误杀；餐厅门槛高德数据更松</td></tr>
+<tr><td>营业时间</td><td>与所排时段重叠 ≥ <b>60 分钟</b>，否则剔除；重叠够但「到达后剩余 ≤ <b>210 分钟</b>」只标注仓促；<b>餐厅完全不校验</b></td><td>「仓促」用剩余时长而非重叠时长（下午窗天然 4.5h，按重叠 17:00 关门都算充裕）；高德餐厅时间最不准</td></tr>
+<tr><td>营业时间解析</td><td><b>按出现顺序取首尾</b>，不能 min/max；尾 ≤ 首则跨夜 +24h</td><td>夜市写「18:00-02:00」，min 会把 02:00 当开门时间，方向整个反了</td></tr>
+<tr><td>每日景点上限</td><td>normal <b>3</b>；theme_park / hike / night_hike <b>1</b>；recovery <b>2</b>；餐厅不计入</td><td>体裁决定节奏</td></tr>
+<tr><td>天型传导</td><td>夜爬 &gt; 主题乐园 &gt; 徒步 强制升级；<b>夜爬/高强度次日强制 recovery</b></td><td>判定顺序：规则表强制 → 模型提议兜底 → <b>统一过用户黑名单</b>（黑名单只挂在第一层会让模型提议路径绕过）</td></tr>
+<tr><td>夜生活去重</td><td>分类酒吧/小吃街，跨天累积不重复；代码层兜底（撞了换同类替代，换不到保留+提示）</td><td>分类细节：\bbar\b 必须卡词边界（否则 barbecue 误判）；小吃街要求「街/市/城/排档」同时出现（否则「沙县小吃」算一条街）</td></tr>
+<tr><td>通勤阈值</td><td>相邻/住处往返 ≤ <b>40 分钟</b>（真实驾车路线）；超了自动换点；换首末站用双锚点，判据取两段较大值</td><td>约束是「最差一段也不能远」，求和会让一段极近掩盖另一段极远；换点必须排除目标自己（否则「换一家酒吧」被自己封掉）</td></tr>
+<tr><td>通勤兜底</td><td>路线查询失败退回<b>直线估算</b>：直线米数 ×1.4 绕行 ÷ 417(米/分钟@25km/h)，最小 1 分钟；对比卡任一方数据缺失就不输出「更短/更长」</td><td>「解析失败给 0」是最危险的默认值——0 在谁更短的比较里是最优值，错得理直气壮</td></tr>
+<tr><td>「换一个」</td><td>半径梯度 1500/3000/5000m 搜同类 → 过评分/营业时间/黑名单 → 按两段通勤之和升序取前 6</td><td>首站换点时上一站是住处、末站下一站也是住处（锚点当虚拟邻站）</td></tr>
+<tr><td>重试与跳过</td><td>单天失败自动重试 <b>2</b> 次，超限跳过该天推进（不死循环）；LangGraph 递归上限 25 是最后的安全网</td><td>刻意「重试当前天」而非「回退前一天」——回退会覆盖已确认结果</td></tr>
+</table>
+
+<h3>5.5 人工裁决（interrupt 的三种形态）</h3>
+<table>
+<tr><th>形态</th><th>图的行为</th><th>用户看到</th></tr>
+<tr><td>逐天确认（单方案）</td><td>planDay 挂起方案不落库 → reviewDay interrupt → 用户确认后 commitDay 落库推进；驳回则意见注入提示词 → 条件边回 planDay 重排同一天</td><td>橙色卡片：当天摘要 + 「确认采用」+ 意见框 + 「需要调整，按意见重新安排」</td></tr>
+<tr><td>并行择优（双方案）</td><td>两个候选各自独立 registry 快照并行生成（Promise.allSettled，防写竞争）→ 启发式打分（评分均值×10 − 驾车通勤×0.5 + 景点数×2）→ 取前两案 → interrupt</td><td>A/B 对比卡：摘要 + 评分均值 + <b>🚗驾车约X ｜ 🚇公交约Y</b> + 优缺点（全部来自真实数据对比，不编形容词）+ 采用A/B + 都不满意可驳回</td></tr>
+<tr><td>降级</td><td>两候选只有一个成功 → 自动降级为单方案确认（对比需要两个对象，硬凑会在 undefined 上取值崩溃）</td><td>普通确认卡</td></tr>
+</table>
+<div class="box good"><b>架构关键决策：</b>交互模式下 planDay <b>不先落库推进</b>，改为「挂起 → 裁决 → 提交」。因为跨天状态（已用 POI 去重、天型强度传导）一旦吸收了当天内容，驳回重排就会被自己的旧地点挡掉、传导也算错。提交动作抽成 commitDay，全自动与交互两条路径共用。</div>
+
+<h3>5.6 断点续跑（checkpointer）</h3>
+<p>SQLite checkpointer（文件在 .debug/，已 gitignore）以 tripId 为 thread_id，<b>每个超级步自动快照图状态</b>。进程崩溃重启后用同 thread_id 重新 invoke 即可从断点节点继续——手写版只能靠 Prisma「天级」恢复（当天排到一半全丢）。注意：checkpointer 只存可 JSON 序列化的状态，registry（Map）、凭证、天气这些放闭包里（buildAgentGraph(ctx) 每次生成构建一次，天然会话隔离）。</p>
+
+<!-- ==================== 6 ==================== -->
+<h2 id="c6">六、数据是怎么存放的</h2>
+
+<h3>6.1 五张表与设计考量</h3>
+<table>
+<tr><th>表</th><th>关键字段</th><th>设计考量</th></tr>
+<tr><td><b>User</b></td><td>username(unique)、passwordHash、avatar</td><td>密码<b>绝不存明文/MD5</b>：用 Node 内置 scrypt（故意算得慢的哈希，防暴力破解）加盐派生，格式 <code>scrypt$N$r$p$salt$hash</code>，校验用 timingSafeEqual 防时序攻击。选它不用 bcrypt/argon2 是因为零依赖、Windows 下无需 C++ 编译</td></tr>
+<tr><td><b>UserSetting</b></td><td>provider、baseUrl、modelName、<b>apiKeyCipher + apiKeyIv + apiKeyTag + keyVersion</b></td><td>用户的模型 Key 用 <b>AES-256-GCM</b> 加密：每条记录独立随机 IV(12字节)、GCM 认证标签保证完整性、主密钥版本号为将来轮换预留。解密失败（主密钥被换）时<b>拒绝带病运行</b>。表里永远查不到明文 Key</td></tr>
+<tr><td><b>Trip</b></td><td>cityName + cityAdcode、startDate/days/travelers、preferences/extraNeeds（JSON 数组字符串）、budgetAmount/budgetScope、stayResolved + stayPoiId/Name/Lng/Lat、<b>status</b>(draft/generating/ready/failed)、genProgress、genDayIndex、genError、genReview、genDecisions</td><td>生成相关的 5 个字段是「后台异步 + 前端轮询」模型的关键：进度文案实时写、待确认载荷 genReview 存 JSON 字符串（<b>故意不用 Json 列</b>，绕开 Prisma 对 Json null 的 DbNull 特殊处理）、genDecisions 存决策数组（上限 50 条，写失败不影响主流程）；简单枚举用 String 而非 enum（SQLite 迁移省事）</td></tr>
+<tr><td><b>TripDay</b></td><td>dayIndex + date、weather(JSON 字符串)、summary、<b>dayType</b>(5 态)、<b>intensity</b>(light/medium/heavy)</td><td><code>@@unique([tripId, dayIndex])</code> 防重复天；dayType/intensity 是跨天传导的持久化载体</td></tr>
+<tr><td><b>TripItem</b></td><td>orderIndex、slot(morning/noon/afternoon/evening)、itemType(spot/restaurant)、<b>poiId/name/lng/lat/address/tel</b>、rating、cost、tag、typecode、openTimeText、note、photos、checkedAt</td><td>注释里写死：<b>「以下字段全部来自高德 POI 返回值，坐标不允许由模型编造」</b>；checkedAt 非空即已打卡；typecode 用于换点时找同类；photos 最多 3 张</td></tr>
+</table>
+
+<h3>6.2 数据大小的确定原则</h3>
+<ul>
+<li><b>能算出来的不存</b>：通勤分钟数随路况变，只在生成时算一次存进条目，地图路线实时重查（5 分钟缓存）；</li>
+<li><b>列表性的存 JSON 字符串</b>（preferences/extraNeeds/photos/weather/genDecisions）——SQLite 下比建关联表省事，且这些数据永远是整体读写、不会按元素查询；genDecisions 设 50 条上限防无限增长；</li>
+<li><b>大对象放文件/缓存不进库</b>：POI 登记表在内存（生命周期=一次生成），图片上传放磁盘 /uploads；</li>
+<li><b>卡上限的地方都有明确数值</b>：单天工具轮次 14、决策 50 条、重试 2 次、/photos 3 张、意见 500 字；</li>
+<li><b>枚举用字符串+注释约定</b>（status/dayType/slot/intensity），前端用常量表映射展示文案。</li>
+</ul>
+
+<h3>6.3 数据从哪来到哪去（高德配额防御）</h3>
+<p>所有外部数据请求都过三层：①<b>进程内 TTL 缓存</b>（地理编码 24h / POI 10min / 天气 30min / 路线 5min）；②<b>并发合并</b>（同一瞬间的相同请求只发一次真调用）；③<b>错误分级</b>——业务错误（Key 无效、配额尽）不重试直接抛，网络/超时/非 2xx 自动重试 2 次，仍失败再走兜底（直线估算）。日志里<b>绝不打印完整请求 URL</b>（里面带 Key）。</p>
+
+<!-- ==================== 7 ==================== -->
+<h2 id="c7">七、前端功能实现细节</h2>
+
+<h3>纸质手帐主题（全局一套变量）</h3>
+<p>整体隐喻「旅行手帐」：行程列表是横躺的牛皮纸<b>书签</b>（右端 clip-path 切 V 形口 + 左端穿线孔，厚 91px），详情页左列是<b>线圈本</b>（纸色底+横向格线+红色页边线+24 个金属环），条目是<b>便利贴</b>（浅底深墨、轻微倾斜、顶端两角半透明胶带）。</p>
+<ul>
+<li><b>核心做法</b>：把 antd 全局 token（colorBgContainer/colorText/colorBorder）换成「纸色+墨色」（白天 #fbf7ec/#3d3527，黑夜 #242a33/#d2d9e2），所有组件自动获得纸质感，调色只改一处；</li>
+<li>结构性颜色（纸色/胶带/书签）写成 index.css 的 CSS 变量，<code>:root[data-theme='night']</code> 里覆盖——<b>组件侧零 if(isNight)</b>；</li>
+<li>便利贴倾斜走 <code>--tilt</code> 变量而非行内 transform（行内优先级最高，hover 就永远盖不掉）；淡彩底按<b>序号</b>轮换不用随机（随机会在滚动时变色像 bug）；</li>
+<li>便利贴底色与墨色必须<b>同源派生</b>（usePaperTheme）——曾出现底色读 DOM 属性、墨色读 React 状态的一帧错位，黑夜切白天瞬间浅底配浅字。</li>
+</ul>
+
+<h3>生成页防抖动三件套</h3>
+<ul>
+<li><code>scrollbar-gutter: stable</code>：滚动容器提前预留滚动条槽位，浮层开合时页面不左右抖；</li>
+<li><code>overscroll-behavior: contain</code>：下拉列表滚到底后滚轮事件就地消化，不冒泡带动整页；</li>
+<li>表单容器 <code>max-height + overflowY:auto + 固定底部按钮</code>：字段再多也只在卡片内滚，步骤条/顶栏纹丝不动。</li>
+</ul>
+
+<h3>打卡与「换一个」</h3>
+<p>打卡纯手动：点按钮写 checkedAt，未打卡空心圆点、已打卡实心+对勾角标+卡片置灰，当天当前目标放大/脉冲，默认只显示当天标记。「换一个」调后端：排除目标自己 → 半径梯度搜同类 → 硬规则过滤 → 两段通勤之和排序 → 抽屉展示前 6 个候选。</p>
+
+<!-- ==================== 8 ==================== -->
+<h2 id="c8">八、错误编年史：26 个真实踩坑与解决措施</h2>
+<p>以下全部是本项目<b>真实发生过</b>的问题。按主题分组，每条都是「现象 → 根因 → 解决 → 教训」。</p>
+<div id="errchart" class="chart"></div>
+
+<h3>8.1 React 与前端</h3>
+<div class="err-item"><h4>① 详情页整页白屏：Rendered more hooks than during the previous render</h4>
+<span class="cause">根因：</span>新增的 hook 写在了 <code>if (loading) return</code> 之后——第一次渲染走 loading 分支少执行几个 hook、数据到达后多执行几个，React 的 Hook 顺序契约直接崩。<br>
+<b>解决：</b>所有 hook 挪到提前 return 之前；无法挪的把依赖数据做成可空安全版。<br>
+<span class="small">教训：这类错误<b>静态类型检查完全查不出来</b>，只有真实渲染才暴露。给组件加 hook 时先确认它落在哪个提前 return 之前。</span></div>
+
+<div class="err-item"><h4>② 端到端点击「点不到」且不报错</h4>
+<span class="cause">根因：</span>表单加高后目标元素落到视口折叠线以下，坐标跑出视口，CDP 鼠标事件打在空气上——<b>静默失败</b>。<br>
+<b>解决：</b>clickReal() 发事件前先 scrollIntoView。</div>
+
+<div class="err-item"><h4>③ antd 6 Select 打不开下拉 / 断言下拉选项漏项</h4>
+<span class="cause">根因：</span>antd 6 不再响应合成 MouseEvent（element.click() 无效），必须 CDP 发真实鼠标事件；且 6 已移除 .ant-select-selector（换 .ant-select-content）；下拉是虚拟滚动（11 项首屏只渲染 10 项），断言前必须先滚到底；选项文本用 textContent 而非 innerText（视口裁剪）。</div>
+
+<div class="err-item"><h4>④ 切主题瞬间便利贴「浅底配浅字」</h4>
+<span class="cause">根因：</span>底色读 documentElement.dataset.theme（DOM 属性，useEffect 里才更新），墨色读 React 主题状态——两者有一帧错位。<br>
+<b>解决：</b>两套颜色都从 usePaperTheme() 同源派生。<span class="small">教训：同一视觉的两个值必须同源，不允许两种读取路径。</span></div>
+
+<div class="err-item"><h4>⑤ 浮层开合页面左右抖动 / 下拉滚到底带动整页</h4>
+<span class="cause">根因：</span>滚动条占位在锁滚动时计算不一致；虚拟列表滚到底后 wheel 事件冒泡到外层。<br>
+<b>解决：</b>scrollbar-gutter: stable + overscroll-behavior: contain + 浮层 max-height。</div>
+
+<div class="err-item"><h4>⑥ 行内 transform 锁死 hover 动效</h4>
+<span class="cause">根因：</span>便利贴倾斜用行内 style.transform，优先级高于任何 CSS 规则，「按平」交互失效。<br>
+<b>解决：</b>倾斜走 CSS 变量 --tilt。</div>
+
+<h3>8.2 LangGraph 与 AI 编排</h3>
+<div class="err-item"><h4>⑦ 「找不到生成上下文」</h4>
+<span class="cause">根因：</span>用 WeakMap 以 config 对象为 key 绑定会话上下文——但 LangGraph 内部会 clone config，引用对不上。<br>
+<b>解决：</b>改为 buildAgentGraph(ctx) <b>闭包捕获</b>，每会话构建一次图，天然隔离。<span class="small">教训：框架文档没说的内部行为（config 会被重建）只能实测发现。</span></div>
+
+<div class="err-item"><h4>⑧ ReducedValue 类型报错</h4>
+<span class="cause">根因：</span>JS 版 1.4.x 的 StateSchema 里累积字段必须 <code>new ReducedValue(zodSchema, {reducer})</code>——第一个参数是 zod schema，直接传默认值不行；文档示例与实际类型定义有出入，以 node_modules 里的 .d.ts 为准。</div>
+
+<div class="err-item"><h4>⑨ review 模式误报「生成失败」</h4>
+<span class="cause">根因：</span>interrupt 让 invoke 提前返回（带 __interrupt__），catch 分支把它当普通失败设了 status=failed。<br>
+<b>解决：</b>显式检查 __interrupt__——中断不是失败，是把「待确认摘要」写进 genProgress/genReview 后正常返回。</div>
+
+<div class="err-item"><h4>⑩ 重复裁决导致同一天连排 4 次</h4>
+<span class="cause">根因：</span>图正在重排时（无挂起中断）又收到 resume，LangGraph 不报错而是<b>从上一个检查点重跑节点</b>。<br>
+<b>解决：</b>resume 前用 getState 检查确实存在挂起 interrupt，否则静默忽略；恢复入口先清 genReview 消掉前端竞态。</div>
+
+<div class="err-item"><h4>⑪ 双方案只剩一个时崩溃：reading 'day' of undefined</h4>
+<span class="cause">根因：</span>优缺点对比硬性取 <code>shown[1-i].day</code>，只剩一个候选时越界。<br>
+<b>解决：</b>候选 &lt; 2 时降级为单方案确认。<span class="small">教训：展示数据依赖 N 个对象时，N 是运行时事实不是编译期假设。</span></div>
+
+<div class="err-item"><h4>⑫ 路由死循环烧到 25 步上限</h4>
+<span class="cause">根因：</span>条件边在特定状态下永远走回同一节点，LangGraph 递归上限 25 触发 GraphRecursionError。<br>
+<b>解决：</b>把「超限跳过推进」的逻辑放进节点自身（节点有状态、条件边是纯路由函数不能改状态）；把递归上限当作最后的安全网写进测试断言。</div>
+
+<h3>8.3 高德接口与数据</h3>
+<div class="err-item"><h4>⑬ 「通勤约 0 分钟」的虚假结论</h4>
+<span class="cause">根因（两层）：</span>①路径规划偶发返回「状态成功但 paths 为空」（限流边缘），代码不报错、duration 解析成 0、还被缓存 5 分钟；②查询失败返回 null，统计时 <code>null ?? 0</code> 当 0 参与对比。<br>
+<b>解决：</b>无 paths 抛 RetryableError；失败退回直线估算（×1.4 绕行 ÷ 417 米/分钟）；统计只对拿到的数据求和、全缺失保持 null；对比遇缺失输出「数据暂缺」而非硬比。<br>
+<span class="small">教训：「解析失败给默认值 0」是数据陷阱——0 在比较里是最优值。缺失就该是 null，宁缺毋错。</span></div>
+
+<div class="err-item"><h4>⑭ 公交耗时恒为 0</h4>
+<span class="cause">根因：</span>高德 v5 接口必须显式传 <code>show_fields=cost</code> 才返回耗时，transit 分支没传（distance 正常返回，极具迷惑性）。<br>
+<b>解决：</b>补上参数；探针直连接口验证 2512 秒 ≈ 42 分钟。<span class="small">教训：怀疑接口时写 20 行探针直连，比读十遍业务代码快。</span></div>
+
+<div class="err-item"><h4>⑮ 夜市营业时间方向反转</h4>
+<span class="cause">根因：</span>解析「18:00-02:00」时用 Math.min 取开门时间，把 02:00 当成了开门。<br>
+<b>解决：</b>按出现顺序取首尾，尾 ≤ 首则跨夜 +24h。</div>
+
+<div class="err-item"><h4>⑯ 换点逻辑拿不到评分和类型</h4>
+<span class="cause">根因：</span>asPoi() 兜底路径会把 rating/type/typecode 抹成空值，下游校验全部失效。<br>
+<b>解决：</b>优先从 registry 取完整 POI，兜底时也尽量保留字段。</div>
+
+<div class="err-item"><h4>⑰ 高德偶发连接中断（HTTP 000 / SSL eof）</h4>
+<span class="cause">根因：</span>网络波动，尤其并行生成时 QPS 处于限流边缘。<br>
+<b>解决：</b>错误分级——业务错误（AmapError，带 infocode）不重试；网络类（RetryableError）自动重试 2 次；仍失败走直线估算或跳过。不要把偶发中断误判为 Key 或参数问题。</div>
+
+<h3>8.4 工程与环境</h3>
+<div class="err-item"><h4>⑱ better-sqlite3 加载失败：NODE_MODULE_VERSION 127 vs 137</h4>
+<span class="cause">根因：</span>原生模块按编译时的 Node 大版本绑定，工具环境 Node 22 编译、用户终端 Node 24 运行（反之亦然）。<br>
+<b>解决：</b>谁的 Node 变了谁 <code>npm rebuild better-sqlite3</code>；且该模块是<b>惰性加载</b>（只在生成触发 checkpointer 时 require），所以页面能开、一点生成就报错，极具迷惑性。</div>
+
+<div class="err-item"><h4>⑲ npm 的 latest 标签不可信</h4>
+<span class="cause">根因：</span>prisma 的 latest 被上游指向 8.0.0-rc 预发布版。<br>
+<b>解决：</b>关键工具链依赖一律 <code>--save-exact</code> 钉死。</div>
+
+<div class="err-item"><h4>⑳ npm 安装脚本被拦截</h4>
+<span class="cause">根因：</span>沙箱 npm 有 allow-scripts 策略，拦截 install/postinstall（better-sqlite3 的 prebuild、esbuild 的 postinstall）。<br>
+<b>解决：</b>优先选平台预编译包（@libsql/client、@esbuild/win32-x64）；含原生编译的安装交给用户本机终端。</div>
+
+<div class="err-item"><h4>㉑ 端口被旧进程占用</h4>
+<span class="cause">根因：</span>改了代码但端口上跑的还是旧进程——请求新路由 404、老路由正常即是判据。<br>
+<b>解决：</b>Git Bash 里 <code>MSYS_NO_PATHCONV=1 taskkill /F /PID x</code>（不带前缀会把 //F 当路径转换）。</div>
+
+<div class="err-item"><h4>㉒ Vite 访问 127.0.0.1 连不上</h4>
+<span class="cause">根因：</span>Vite 默认绑 localhost（IPv6）。用 localhost:5173 访问。</div>
+
+<div class="err-item"><h4>㉓ 后台服务留不住</h4>
+<span class="cause">根因：</span>沙箱里 nohup/background 启动的进程在命令结束时被清理，下次调用 ECONNREFUSED。<br>
+<b>解决：</b>启动、等待、验证、读日志写进同一条 Bash 命令内完成。</div>
+
+<div class="err-item"><h4>㉔ Prisma 7 三个非常规约定</h4>
+连接串在 prisma.config.ts 不在 schema；客户端必须传 libsql 适配器（裸 new PrismaClient 直接崩）；CLI 必须在 apps/server 目录下执行且钉 7.10.0。</div>
+
+<div class="err-item"><h4>㉕ Prisma Json 列的 null 陷阱</h4>
+<span class="cause">根因：</span>Prisma 对 Json 列置空要 Prisma.DbNull，直接 null 会校验失败。<br>
+<b>解决：</b>genReview 故意用 String? 存 JSON.stringify 文本。</div>
+
+<div class="err-item"><h4>㉖ 前后端日志都说「成功」但数据是错的</h4>
+<span class="cause">根因：</span>见⑬——每一层都「成功」了，只有最终展示的 0 分钟暴露问题。<br>
+<b>解决：</b>给数据链路加「探针脚本」直连最底层接口，逐层对照。</div>
+
+<script>
+  // 错误分布图（ECharts CDN 失败时优雅降级）
+  if (window.echarts) {
+    var chart = echarts.init(document.getElementById('errchart'));
+    chart.setOption({
+      title: { text: '26 个踩坑的根因分布', left: 'center', textStyle: { fontSize: 15 } },
+      tooltip: { trigger: 'item', formatter: '{b}: {c} 个 ({d}%)' },
+      series: [{
+        type: 'pie', radius: ['35%', '62%'], center: ['50%', '55%'],
+        label: { formatter: '{b}\n{c} 个' },
+        data: [
+          { value: 6, name: 'React/前端渲染', itemStyle: { color: '#1565c0' } },
+          { value: 6, name: 'LangGraph 编排', itemStyle: { color: '#6a4fa3' } },
+          { value: 5, name: '高德接口与数据', itemStyle: { color: '#2e7d32' } },
+          { value: 9, name: '工程与环境', itemStyle: { color: '#b5651d' } }
+        ]
+      }]
+    });
+    window.addEventListener('resize', function(){ chart.resize(); });
+  } else {
+    document.getElementById('errchart').innerHTML =
+      '<p style="text-align:center;padding-top:140px;color:#93876a">（离线状态，图表省略：前端 6 · LangGraph 6 · 高德 5 · 工程环境 9）</p>';
+  }
+</script>
+
+<!-- ==================== 9 ==================== -->
+<h2 id="c9">九、错误处理哲学：三条原则</h2>
+
+<div class="box good"><b>原则一：错误分级，区别对待。</b>不是所有错误都值得重试——业务性错误（Key 无效、参数错）重试一万次也没用，直接把可读的原因抛给用户；只有瞬时性错误（网络抖动、限流边缘）才配自动重试。本项目把错误分成 AmapError（不重试）与 RetryableError（重试 2 次），并且<b>把可读的错误信息一路带到前端</b>（genError 字段），而不是让用户看到「出错了」。</div>
+
+<div class="box good"><b>原则二：宁缺毋错，缺失绝不是 0。</b>数据拿不到时，唯一诚实的表示是 null + 前端展示「未知」。<b>绝不允许「解析失败给默认值 0」</b>——因为 0 在「谁更短、谁更便宜」这类比较里是最优值，缺失会伪装成冠军。同理：评分缺失放行而不是按 0 分剔除；公交查不到显示「未知」而不是拿驾车时间冒充。</div>
+
+<div class="box good"><b>原则三：不报错的失败最危险。</b>这轮最贵的三个坑——点击落到视口外、浮层重入导致重复重排、paths 为空解析成 0——<b>全部没有任何报错</b>。对策是两条：①关键路径埋「结构性证据」的自检（smoke 77 条断言 + check 65+19 条），断言的是数据形状而非界面文案（文案断言曾因渲染时序产生假失败）；②对框架的隐式行为（config 会 clone、无中断时 resume 会重跑）永远用最小探针实测，不信文档也不信记忆。</div>
+
+<!-- ==================== 10 ==================== -->
+<h2 id="c10">十、一次请求复刻整个项目的提示词</h2>
+<p>下面这段提示词浓缩了以上全部决策与细节。把它发给一个足够强的 AI 编码助手，理论上可一次请求重建整个项目（分前后端两个 workspace、全部核心文件）：</p>
+
+<div class="prompt-block">请为我构建一个「AI 旅游规划」Web 应用，npm workspaces 双端结构（apps/web + apps/server），根目录 npm run dev 一键启动。严格遵循以下全部决策，不要省略。
+
+【技术栈】前端：React 19 + Vite + TypeScript + Ant Design 6（注意 v6 改名 API：Alert 用 title 不是 message，Space 用 orientation）+ react-router-dom 7 + dayjs。后端：Node 22 + Express 5 + TypeScript + Prisma 7（CLI 精确钉 7.10.0，连接串放 prisma.config.ts 不放 schema，客户端必须传 @prisma/adapter-libsql 适配器，开发期 SQLite 上线目标 Postgres）+ zod + jsonwebtoken + @langchain/langgraph@1.4.15（--save-exact）+ @langchain/langgraph-checkpoint-sqlite@1.0.4。所有源码行注释写中文。
+
+【数据模型】5 张表：User（username unique、passwordHash 用 Node 内置 crypto.scrypt 加盐派生，存储格式 scrypt$N$r$p$salt$hash，校验用 timingSafeEqual；avatar 支持 emoji: 与上传路径两种）；UserSetting（provider/baseUrl/modelName + 用户的模型 API Key 用 AES-256-GCM 加密为 apiKeyCipher/apiKeyIv/apiKeyTag 三段，主密钥放服务端 env，keyVersion 预留轮换，解密失败拒绝服务）；Trip（cityName/cityAdcode/startDate/days/travelers/preferences/extraNeeds 均为 JSON 数组字符串/budgetAmount/budgetScope/stayResolved+stayPoiId+stayName+stayLng+stayLat/status 枚举 draft|generating|ready|failed/genProgress/genDayIndex/genError/genReview 存 JSON 字符串不用 Json 列/genDecisions 存 JSON 数组上限 50 条）；TripDay（tripId+dayIndex 唯一、date、weather JSON、summary、dayType 五态 normal|theme_park|hike|night_hike|recovery、intensity light|medium|heavy）；TripItem（orderIndex/slot morning|noon|afternoon|evening/itemType spot|restaurant/poiId/name/lng/lat/address/tel/rating/cost/tag/typecode/openTimeText/note/photos 数组/checkedAt 打卡时间）。所有坐标字段必须来自高德 POI 返回值，模型绝不提供坐标——用 registry（Map）登记制强制。
+
+【高德集成】两套 Key 分开：前端 JS API Key 渲染地图、后端 Web 服务 Key 做数据接口，后者绝不暴露给前端，前端通过 /api/amap/* 代理访问。服务层统一封装，日志绝不打印含 Key 的完整 URL。错误分级：业务错误带 infocode 不重试，网络/超时/非 2xx 重试 2 次。进程内 TTL 缓存：地理编码 24h、POI 10 分钟、天气 30 分钟、路线 5 分钟，相同请求并发合并。v5 接口注意：POI 搜索要 show_fields=business,photos 才有评分营业时间；驾车路线要 show_fields=cost,polyline；transit 接口必须传 show_fields=cost 否则耗时恒为 0；路径规划响应无 paths 时必须当可重试错误抛出，否则会解析成 0 并被缓存。
+
+【生成编排：LangGraph 图】节点 resolveAnchor → planDay → reviewDay → 条件边 → finalize，条件边做天循环。状态用 new StateSchema（累积字段用 new ReducedValue(zod schema,{reducer})），外部上下文（POI 登记表、天气、凭证、落库函数）通过 buildAgentGraph(ctx) 闭包捕获——绝不能走 config 传递（内部会 clone，WeakMap 找不到）。每个生成会话构建一次图实例。SQLite checkpointer 文件放 .debug/，thread_id 用 tripId，checkpointer 做模块级惰性单例。planDay 内部：模型带 5 个工具（search_poi/search_nearby/get_route/get_weather/get_city_center，均包装高德接口）循环最多 14 轮 → 解析 JSON（失败带错误重问一次）→ 规则校验 → 通勤体检。硬规则全部代码层强制：景点评分 <4 剔除餐厅 <3.5、评分缺失放行；营业时间与所排时段重叠 ≥60 分钟否则剔除（解析按出现顺序取首尾、尾≤首跨夜+24h），到达后剩余 ≤210 分钟标注仓促，餐厅不校验；每日景点上限 normal 3 / theme_park|hike|night_hike 1 / recovery 2，餐厅不计；天型规则表强制升级（夜爬>主题乐园>徒步）→模型提议兜底→统一过用户额外需求解析出的黑名单；夜爬/高强度次日强制 recovery；夜生活分类（酒吧用 \bbar\b 卡词边界、小吃街要求街/市/城/排档同现）跨天去重，撞类换替代点换不到保留提示。通勤体检：逐段真实驾车路线 ≤40 分钟，超了从登记表换点（半径梯度 1500/3000/5000 米、必须排除目标自己、首末站用住处当虚拟邻站、判据取两段较大值）；路线查询失败退回直线估算（×1.4 绕行 ÷417 米每分钟、最小 1）；只对拿到的数据求和，全缺失保持 null，对比时缺失方绝不参与「更短」结论。单天失败自动重试 2 次，超限由节点自行跳过推进（条件边是纯路由不能改状态；LangGraph 递归上限 25 是安全网）。
+
+【人机协作】状态字段 status/genProgress/genDayIndex/genError/genReview 驱动「后台异步 + 前端 2.5 秒轮询」。触发生成接口立刻返回 202；同行程 10 分钟内已在生成中返回 409。交互模式下 planDay 不落库改为挂起 pendingDay/pendingCandidates，reviewDay 用 interrupt 暂停：单方案 interrupt({kind:'confirm',dayIndex,summary})，用户可确认或驳回（附 ≤500 字意见，意见注入 userPrompt 尾部「本轮最高优先级」，条件边回 planDay 重排同一天）；并行模式（ctx.parallelCandidates>1）两个候选各自独立 registry 快照 Promise.allSettled 并行生成、启发式打分（评分均值×10−驾车通勤×0.5+景点数×2）取前两名 interrupt({kind:'choose',candidates:[{label:'A'|'B',summary,ratingAvg,commuteMinutes,transitMinutes,spotCount,pros,cons}]})，通勤分驾车与公交两种方式（transit 调用需传 city1/city2=adcode 且 show_fields=cost），用户采用 A/B 或都驳回；只剩一个候选时降级为单方案确认。用户裁决经 POST /:id/review-confirm 用 new Command({resume:answer}) 恢复；恢复前先清 genReview 并用 getState 检查确有挂起 interrupt（没有则静默忽略，否则 LangGraph 会从检查点重跑节点）；成功/失败/完成各处都要清 genReview。优缺点由两案真实数据互相对比生成（评分均值/驾车通勤/景点数），绝不编形容词。
+
+【前端】四步向导：①城市输入失焦调高德地理编码换 6 位 adcode+中心坐标，日期/天数/人数/偏好多选/预算/额外需求多选（「不含爬山」等解析为结构化黑名单）；②内嵌高德 JS 地图选住宿或选「还没定」；③生成页两个开关（逐天人工确认、并行择优并提示「消耗与耗时约翻倍」），轮询渲染进度，genReview 解析为确认卡片（确认/驳回+意见框；双方案 A/B 对比卡含评分、🚗驾车、🚇公交、优缺点）；④详情页左列时段分组时间轴、右列地图画真实驾车路线含住处往返闭环，条目可换一个、手动打卡（未打卡空心、已打卡实心对勾置灰）。视觉是「纸质手帐」主题：antd token 全局换成纸色+墨色（白天 #fbf7ec/#3d3527，黑夜 #242a33/#d2d9e2），列表为牛皮纸书签（clip-path V 口+穿线孔、厚 91px），详情左列线圈本（格线+红页边线+金属环），条目为浅底深墨便利贴（倾斜用 --tilt 变量、淡彩按序号轮换、两角胶带），主题切换只改 CSS 变量组件侧零 if。布局：滚动容器 scrollbar-gutter:stable，下拉浮层 overscroll-behavior:contain + max-height，长表单 max-height 内滚+底部固定按钮。React Hook 必须全部在提前 return 之前。
+
+【安全】密码 scrypt；模型 Key AES-256-GCM；JWT 登录；所有列表接口按 userId 隔离；前端源码绝不出现明文 Key。
+
+【验证】三层：check:scheduler（65 条纯函数规则断言）、check:graph（19 条图结构断言含 checkpointer 跨实例恢复与 interrupt）、smoke 端到端（CDP 驱动真实浏览器，77 条断言含真实模型生成、双主题视觉、点击前 scrollIntoView、antd Select 用真实鼠标事件并滚动虚拟列表）。完成后跑全部自检，全绿为止。</div>
+
+<div class="box tip"><b>怎么用这段提示词：</b>①发给 AI 后，先要求它输出<b>文件清单</b>和<b>图结构草图</b>确认理解一致，再动手；②模型最容易漏的是「坐标登记制」「营业时间首尾解析」「null 不当 0」这三条数据纪律——如果它的实现里没有 registry 和 validateDay，立即指出；③生成后先跑自检三件套再谈功能，让断言替你审查它的代码；④遇到 LangGraph 相关报错，回到第八章对照排查。</div>
+
+<div class="box def" style="margin-top:40px"><b>文档小结：</b>这个项目的本质是「<b>用代码给 AI 立规矩</b>」——模型负责创造性与决策（去哪、怎么串、怎么改），代码负责事实与底线（坐标从哪来、评分够不够、通勤多远、何时该问人、错了怎么办）。所有复杂度都围绕这条主线生长：数据不可信所以建准入规则，用户要掌控所以建人机协作，流程会中断所以建检查点。理解了这条主线，每一处代码细节都有了归属。</div>
+
+</div>
+</body>
+</html>

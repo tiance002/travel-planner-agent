@@ -24,8 +24,6 @@ export const DayStateRefSchema = z.object({
   intensity: z.string(),
 })
 
-export type DayStateRef = z.infer<typeof DayStateRefSchema>
-
 /**
  * 图状态。
  *
