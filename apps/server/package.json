@@ -14,9 +14,12 @@
     "try:generate": "tsx scripts/try-generate.ts",
     "check:credential": "tsx scripts/check-credential.ts",
     "check:parser": "tsx scripts/check-parser.ts",
-    "check:scheduler": "tsx scripts/check-scheduler.ts"
+    "check:scheduler": "tsx scripts/check-scheduler.ts",
+    "check:graph": "tsx scripts/check-graph.ts"
   },
   "dependencies": {
+    "@langchain/core": "1.2.11",
+    "@langchain/langgraph": "1.4.15",
     "@libsql/client": "0.17.0",
     "@prisma/adapter-libsql": "7.10.0",
     "@prisma/client": "^7.10.0",

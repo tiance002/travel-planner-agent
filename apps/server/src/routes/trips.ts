@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { generateTrip } from '../services/agent'
+import { generateTripWithGraph } from '../services/agent/graph-run'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById, type Poi } from '../services/amap'
@@ -262,7 +263,11 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
 
     // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
     // 失败时把原因写进 genError，前端就能直接展示给用户看。
-    void generateTrip(trip.id, { mode }).catch(async (error: unknown) => {
+    //
+    // 环境变量 USE_LANGGRAPH=1 时走 LangGraph 图编排（V1 起的并行重写），
+    // 否则走手写版。两版并存，便于逐版本对比验证，稳定后再默认切到图版。
+    const runGenerate = process.env.USE_LANGGRAPH === '1' ? generateTripWithGraph : generateTrip
+    void runGenerate(trip.id, { mode }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '生成失败'
       console.error(`[生成 ${trip.id}] 失败：${message}`)
       await prisma.trip
