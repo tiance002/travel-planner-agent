@@ -69,6 +69,7 @@ export async function generateTripWithGraph(
   }
 
   const report = createReporter(tripId)
+  const recordDecision = createDecisionRecorder(tripId)
   const registry = new Map<string, Poi>()
 
   // 用户已选住宿时登记进表，模型才能算「住宿 → 第一站」的真实通勤
@@ -169,6 +170,7 @@ export async function generateTripWithGraph(
     reviewMode,
     // V4 并行择优：环境变量可开，默认 1（不并行，成本与手写版一致）
     parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
+    recordDecision,
   }
 
   // 构建图（闭包捕获 ctx），驱动执行。
@@ -252,6 +254,7 @@ export async function resumeTripReview(tripId: string): Promise<void> {
   if (!credentials) throw new GraphGenerateError('还没有配置模型 API Key')
 
   const report = createReporter(tripId)
+  const recordDecision = createDecisionRecorder(tripId)
   const registry = new Map<string, Poi>()
 
   const stayInfo = await loadStayPoi(trip)
@@ -302,6 +305,7 @@ export async function resumeTripReview(tripId: string): Promise<void> {
     reviewMode: true,
     // 恢复路径沿用与首次生成相同的并行配置
     parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
+    recordDecision,
   }
 
   const graph = buildAgentGraph(ctx, getCheckpointer())
@@ -351,6 +355,39 @@ function createReporter(tripId: string) {
     lastWriteAt = now
     void prisma.trip
       .update({ where: { id: tripId }, data: { genProgress: text } })
+      .catch(() => undefined)
+  }
+}
+
+/**
+ * 决策记录器（V5 可视化）：把关键决策追加进 Trip.genDecisions（JSON 数组）。
+ *
+ * 读-改-写有并发风险（两个会话同时写同一个 trip 会互相覆盖），
+ * 但一个 trip 同时只会有一个生成会话（路由层有 generating 拦截），
+ * 所以这里简单处理即可。写失败不影响生成主流程。
+ */
+function createDecisionRecorder(tripId: string) {
+  return (text: string) => {
+    void prisma.trip
+      .findUnique({ where: { id: tripId }, select: { genDecisions: true } })
+      .then((trip) => {
+        let list: string[] = []
+        if (trip?.genDecisions) {
+          try {
+            const parsed = JSON.parse(trip.genDecisions)
+            if (Array.isArray(parsed)) list = parsed.map(String)
+          } catch {
+            // 旧数据不是合法 JSON 就重开一份
+          }
+        }
+        list.push(text)
+        // 最多留 50 条，避免极端情况下无限膨胀
+        const trimmed = list.slice(-50)
+        return prisma.trip.update({
+          where: { id: tripId },
+          data: { genDecisions: JSON.stringify(trimmed) },
+        })
+      })
       .catch(() => undefined)
   }
 }

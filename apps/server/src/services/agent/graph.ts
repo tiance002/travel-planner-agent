@@ -101,6 +101,11 @@ export interface AgentGraphContext {
    * 成本随 N 线性增长（每套都是一次完整的模型+高德往返），默认 1 = 关闭。
    */
   parallelCandidates: number
+  /**
+   * 记录一条关键决策（V5 可视化）。落进 Trip.genDecisions（JSON 数组），
+   * 完成后前端可回看「AI 是怎么排的」。写失败不影响生成主流程。
+   */
+  recordDecision: (text: string) => void
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +199,9 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       }
       ctx.anchor = anchor.poi
       ctx.log(`住宿锚点：${anchor.poi.name}（${anchor.reason || '未说明理由'}）`)
+      ctx.recordDecision(
+        `住宿锚点选在「${anchor.poi.name}」${anchor.reason ? `：${anchor.reason}` : ''}`,
+      )
 
       await prisma.trip.update({
         where: { id: ctx.tripId },
@@ -370,6 +378,9 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
               .map((s) => s.score.toFixed(1))
               .join('、') || '无'}）`,
         )
+        ctx.recordDecision(
+          `第 ${dayIndex} 天并行生成 ${settled.length} 套方案，择优选用评分最高的一套（${scored[0].score.toFixed(1)} 分）`,
+        )
         // 把落选候选的 POI 也登记进主表（它们已通过高德查证，后续天可以复用）
         for (const reg of candidateRegistries) {
           for (const [poiId, poi] of reg) ctx.registry.set(poiId, poi)
@@ -406,6 +417,10 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       }
 
       ctx.log(`第 ${dayIndex} 天体裁：${day.dayType}（强度 ${day.intensity}）`)
+      // 体裁判定是跨天传导的关键决策，记录下来供用户回看
+      ctx.recordDecision(
+        `第 ${dayIndex} 天体裁判定为「${day.dayType}」（强度 ${day.intensity}），安排 ${day.items.length} 个地点`,
+      )
 
       await prisma.trip.update({
         where: { id: ctx.tripId },

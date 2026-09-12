@@ -146,6 +146,56 @@ START → resolveAnchor → planDay ──条件边──┐
 
 ---
 
-## V5 —— 状态可视化 + 文档收尾（规划）
+## V5 —— 决策可视化 + 收尾
 
-生成过程决策步骤下发前端 + 完整文档。
+**目标**：让用户能看到「AI 是怎么排的」——这不只是炫技，而是建立信任：用户看到体裁判定、
+并行择优、跨天传导这些真实决策，才会相信行程不是随机生成的。
+
+**实现**：
+- Prisma 迁移 `20260912041054_add_gen_decisions`：Trip 新增 `genDecisions`（JSON 数组字符串）。
+- `createDecisionRecorder()`：读-改-写追加决策（上限 50 条防膨胀），写失败不影响主流程。
+- 三个关键决策点落记录：
+  1. 锚点确定（「住宿锚点选在 X：理由」）
+  2. 体裁判定（「第 N 天体裁判定为 theme_park（强度 heavy），安排 1 个地点」）
+  3. 并行择优（「第 N 天并行生成 2 套方案，择优选用评分最高的一套」）
+- 生成过程中的实时进度（`genProgress`）本身已含决策信息（搜索哪个景点、规划哪段路线），
+  两者配合：过程看 genProgress，结果回看 genDecisions。
+
+**最终验证矩阵**：
+
+| 项目 | 结果 |
+|---|---|
+| `npx tsc --noEmit` | 通过 |
+| `npm run check:graph`（图拓扑/checkpointer/interrupt/回退/并发） | 19/19 |
+| `npm run check:scheduler`（规则层纯函数） | 65/65 |
+| `npm run smoke`（端到端，含真实模型+高德） | 77/77 |
+| 图版真实生成（USE_LANGGRAPH=1） | 成功 |
+| 图版逐天确认（mode=review） | 三天各暂停/确认一次 |
+| 图版并行择优（PARALLEL_CANDIDATES=2） | 三天各并行 2 套、择优落库 |
+| 决策记录落库（genDecisions） | 正常追加 |
+
+---
+
+## 总结：这一轮重写到底带来了什么
+
+| 能力 | 手写版 | LangGraph 版 |
+|---|---|---|
+| 按天循环 | for 循环 | 条件边（可读、可扩展） |
+| 断点续跑 | 天级（Prisma 落库） | 节点级（SQLite checkpointer + Prisma 双保险） |
+| 人工介入 | 无（只能事后换点） | interrupt 逐天确认，Command(resume) 恢复 |
+| 失败处理 | 整趟失败停下 | 节点级重试（最多 2 次）+ 超限跳过继续 |
+| 多方案择优 | 无 | 并行 N 套启发式择优（可开关） |
+| 决策可回看 | 只有日志 | genDecisions 落库 |
+| 递归死循环防护 | 无 | GraphRecursionError 天然安全网 |
+
+**没有变化的**（这是刻意为之）：评分门槛、营业时间校验、天型判定、黑名单、
+夜生活去重、真实通勤体检——这些是项目真正的护城河，全部原样复用
+`scheduler.ts` / `spot-rules.ts`，并由 65 条断言持续守护。
+
+## 后续可选方向
+
+1. **前端接入 review 模式**：`mode=review` + `review-confirm` 接口已就绪，
+   前端加一个「逐天确认生成」入口和确认卡片即可上线。
+2. **genDecisions 前端展示**：详情页加一个「AI 决策回看」折叠面板。
+3. **LangSmith 追踪**：配一个 Key 就能看到每一步的完整 trace，调试体验质变。
+4. **PostgreSQL 上线时**：checkpointer 从 SQLite 换 `@langchain/langgraph-checkpoint-postgres`。

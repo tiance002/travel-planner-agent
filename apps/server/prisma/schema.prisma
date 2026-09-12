@@ -106,6 +106,9 @@ model Trip {
   genDayIndex Int?
   /// 生成失败的原因。status 为 failed 时才有值
   genError String?
+  /// 生成过程中的关键决策记录（JSON 数组），LangGraph 编排时逐条追加。
+  /// 完成后前端可回看「AI 是怎么排的」：体裁判定、并行择优、换点、跨天传导等
+  genDecisions String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
