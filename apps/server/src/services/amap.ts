@@ -601,6 +601,8 @@ export async function planRoute(options: PlanRouteOptions): Promise<RouteResult>
         destination,
         city1: options.city1,
         city2: options.city2 ?? options.city1,
+        // v5 接口必须显式声明 show_fields 才会返回 cost.duration，否则耗时恒为 0
+        show_fields: 'cost',
       })
       const transit = json.route?.transits?.[0]
       const parts: (string | undefined)[] = []

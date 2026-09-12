@@ -33,7 +33,7 @@
 
 import { END, START, StateGraph, interrupt, type BaseCheckpointSaver, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
 import { prisma } from '../../db'
-import { type Poi } from '../amap'
+import { planRoute, type Poi } from '../amap'
 import { type ModelCredentials } from '../llm'
 import { reaskForJson, runToolLoop, type ChatMessage } from './model-client'
 import {
@@ -216,14 +216,14 @@ function buildProsCons(mine: CandidateStats, other: CandidateStats): { pros: str
 
   if (mine.commuteMinutes !== null && other.commuteMinutes !== null) {
     if (mine.commuteMinutes < other.commuteMinutes - 5) {
-      pros.push(`总通勤更短（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+      pros.push(`驾车通勤更短（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
     } else if (mine.commuteMinutes > other.commuteMinutes + 5) {
-      cons.push(`总通勤更长（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+      cons.push(`驾车通勤更长（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
     } else {
-      pros.push(`总通勤与另一案相当（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
+      pros.push(`驾车通勤与另一案相当（约 ${Math.round(mine.commuteMinutes)} 分钟）`)
     }
   } else {
-    cons.push('通勤数据暂缺（路线查询未成功），请以地图实际路线为准')
+    cons.push('驾车通勤数据暂缺（路线查询未成功），请以地图实际路线为准')
   }
 
   if (mine.spotCount > other.spotCount) {
@@ -233,6 +233,60 @@ function buildProsCons(mine: CandidateStats, other: CandidateStats): { pros: str
   }
 
   return { pros, cons }
+}
+
+/**
+ * 估算一段路程的公共交通耗时（分钟）。公交路径规划需要城市 adcode（city1/city2）。
+ * 查不到公交方案（线路太少、限流）时返回 null——宁缺毋错，
+ * 绝不能把缺失当 0 参与展示（「通勤 0 分钟」那次就是这么来的）。
+ */
+async function estimateTransitMinutes(
+  from: { lng: number; lat: number },
+  to: { lng: number; lat: number },
+  cityAdcode: string,
+): Promise<number | null> {
+  try {
+    const route = await planRoute({
+      mode: 'transit',
+      originLng: from.lng,
+      originLat: from.lat,
+      destLng: to.lng,
+      destLat: to.lat,
+      city1: cityAdcode,
+      city2: cityAdcode,
+    })
+    if (!route.duration || route.duration <= 0) return null
+    return Math.max(1, Math.round(route.duration / 60))
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 一整天的公共交通总耗时：住处→首站 + 相邻各段（与驾车统计同口径）。
+ * 某段查不到公交方案就跳过；全都没有时返回 null（前端展示「公交未知」）。
+ * 导出供自检脚本直接验证组装逻辑。
+ */
+export async function estimateTransitTotal(
+  day: PlannedDay,
+  anchor: Poi,
+  cityAdcode: string,
+): Promise<number | null> {
+  const points: ({ lng: number; lat: number } | null)[] = [
+    { lng: anchor.lng, lat: anchor.lat },
+    ...day.items.map((item) =>
+      item.lng != null && item.lat != null ? { lng: item.lng, lat: item.lat } : null,
+    ),
+  ]
+  const segments: number[] = []
+  for (let i = 1; i < points.length; i++) {
+    const from = points[i - 1]
+    const to = points[i]
+    if (!from || !to) continue
+    const m = await estimateTransitMinutes(from, to, cityAdcode)
+    if (m !== null) segments.push(m)
+  }
+  return segments.length > 0 ? segments.reduce((sum, m) => sum + m, 0) : null
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +599,12 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
 
         if (shown.length >= 2) {
           const labels = ['A', 'B'] as const
+          // 公共交通估算：用户不一定会开车，只给驾车时间没有参考意义。
+          // 逐案顺序查询（transit 接口较重，且高德对并发敏感）
+          const transitTotals: (number | null)[] = []
+          for (const cand of shown) {
+            transitTotals.push(await estimateTransitTotal(cand.day, anchor, ctx.basics.cityAdcode))
+          }
           const pendingCandidates = shown.map((cand, i) => {
             const mine = statsOf(cand.day)
             const other = statsOf(shown[1 - i].day)
@@ -557,6 +617,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
                 `${cand.day.items.length} 个地点（${cand.day.dayType}）`,
               ratingAvg: Number(mine.ratingAvg.toFixed(1)),
               commuteMinutes: mine.commuteMinutes === null ? null : Math.round(mine.commuteMinutes),
+              transitMinutes: transitTotals[i],
               spotCount: mine.spotCount,
               pros,
               cons,
@@ -635,7 +696,8 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
           label: 'A' | 'B'
           summary: string
           ratingAvg: number
-          commuteMinutes: number
+          commuteMinutes: number | null
+          transitMinutes: number | null
           spotCount: number
           pros: string[]
           cons: string[]

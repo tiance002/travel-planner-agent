@@ -160,8 +160,10 @@ interface ReviewCandidate {
   summary: string
   /** 景点评分均值（一位小数） */
   ratingAvg: number
-  /** 全天通勤总分钟数（估算）。null = 路线查询失败，无可用数据 */
+  /** 全天驾车通勤总分钟数（估算）。null = 查询失败，无可用数据 */
   commuteMinutes: number | null
+  /** 全天公共交通通勤总分钟数（估算）。null = 查不到公交方案 */
+  transitMinutes: number | null
   spotCount: number
   pros: string[]
   cons: string[]
@@ -970,11 +972,15 @@ export default function NewTrip() {
                       <Space size={8} style={{ marginBottom: 6 }}>
                         <Tag color="blue">方案 {c.label}</Tag>
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          评分均值 {c.ratingAvg} 分 ｜{' '}
-                          {c.commuteMinutes === null ? '通勤未知' : `通勤约 ${c.commuteMinutes} 分钟`} ｜{' '}
-                          {c.spotCount} 个景点
+                          评分均值 {c.ratingAvg} 分 ｜ {c.spotCount} 个景点
                         </Typography.Text>
                       </Space>
+                      {/* 通勤分驾车/公交两种方式展示：用户不一定开车，
+                          只给一个不标方式的数字没有参考意义 */}
+                      <div style={{ fontSize: 12, color: token.colorTextSecondary, marginBottom: 6 }}>
+                        🚗 驾车约 {c.commuteMinutes === null ? '未知' : `${c.commuteMinutes} 分钟`}
+                        {' ｜ '}🚇 公交约 {c.transitMinutes === null ? '未知' : `${c.transitMinutes} 分钟`}
+                      </div>
                       <Typography.Paragraph style={{ marginBottom: 8, fontSize: 13 }}>
                         {c.summary}
                       </Typography.Paragraph>
