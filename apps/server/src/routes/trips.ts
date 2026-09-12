@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { generateTrip } from '../services/agent'
-import { generateTripWithGraph } from '../services/agent/graph-run'
+import { generateTripWithGraph, resumeTripReview } from '../services/agent/graph-run'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById, type Poi } from '../services/amap'
@@ -222,7 +222,7 @@ const STALE_GENERATING_MS = 10 * 60 * 1000
 //   continue —— 保留已经排好的天，从第一个空缺的天接着排（默认，失败后重试也走这条）
 //   restart  —— 清空已有安排，从第 1 天重新排（用户点「重新生成」时用）
 const generateSchema = z.object({
-  mode: z.enum(['continue', 'restart']).default('continue'),
+  mode: z.enum(['continue', 'restart', 'review']).default('continue'),
 })
 
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
@@ -266,10 +266,59 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
     //
     // 环境变量 USE_LANGGRAPH=1 时走 LangGraph 图编排（V1 起的并行重写），
     // 否则走手写版。两版并存，便于逐版本对比验证，稳定后再默认切到图版。
-    const runGenerate = process.env.USE_LANGGRAPH === '1' ? generateTripWithGraph : generateTrip
-    void runGenerate(trip.id, { mode }).catch(async (error: unknown) => {
-      const message = error instanceof Error ? error.message : '生成失败'
-      console.error(`[生成 ${trip.id}] 失败：${message}`)
+    // review 模式（逐天人工确认）是 V3 图版专属能力，手写版不支持，强制走图版。
+    const useGraph = process.env.USE_LANGGRAPH === '1' || mode === 'review'
+    if (useGraph) {
+      void generateTripWithGraph(trip.id, { mode }).catch(async (error: unknown) => {
+        const message = error instanceof Error ? error.message : '生成失败'
+        console.error(`[生成 ${trip.id}] 失败：${message}`)
+        await prisma.trip
+          .update({
+            where: { id: trip.id },
+            data: { status: 'failed', genProgress: null, genError: message },
+          })
+          .catch(() => undefined)
+      })
+    } else {
+      void generateTrip(trip.id, { mode }).catch(async (error: unknown) => {
+        const message = error instanceof Error ? error.message : '生成失败'
+        console.error(`[生成 ${trip.id}] 失败：${message}`)
+        await prisma.trip
+          .update({
+            where: { id: trip.id },
+            data: { status: 'failed', genProgress: null, genError: message },
+          })
+          .catch(() => undefined)
+      })
+    }
+
+    res.status(202).json({ ok: true, status: 'generating', mode })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// 逐天人工确认（V3，仅图版 review 模式）：用户在「待确认」后点了「确认采用」，
+// 用 Command(resume) 让图从 interrupt 处继续排下一天。
+tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
+  try {
+    const trip = await prisma.trip.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+      select: { id: true, status: true },
+    })
+    if (!trip) {
+      res.status(404).json({ error: '行程不存在' })
+      return
+    }
+    if (trip.status !== 'generating') {
+      res.status(409).json({ error: '行程当前不在生成中，无需确认' })
+      return
+    }
+
+    // 与 generate 一样，后台恢复，接口立刻返回
+    void resumeTripReview(trip.id).catch(async (error: unknown) => {
+      const message = error instanceof Error ? error.message : '确认失败'
+      console.error(`[生成 ${trip.id}] 确认失败：${message}`)
       await prisma.trip
         .update({
           where: { id: trip.id },
@@ -278,7 +327,7 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
         .catch(() => undefined)
     })
 
-    res.status(202).json({ ok: true, status: 'generating', mode })
+    res.status(202).json({ ok: true, status: 'reviewing' })
   } catch (err) {
     next(err)
   }

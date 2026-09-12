@@ -26,7 +26,7 @@
 //   3. 每个生成会话调用一次 buildAgentGraph(ctx)，图实例本身就是会话隔离的，
 //      闭包捕获的 ctx 天然不会并发串味。
 
-import { END, START, StateGraph, type BaseCheckpointSaver, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
+import { END, START, StateGraph, interrupt, type BaseCheckpointSaver, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
 import { prisma } from '../../db'
 import { type Poi } from '../amap'
 import { type ModelCredentials } from '../llm'
@@ -90,6 +90,12 @@ export interface AgentGraphContext {
   persistDay: (day: PlannedDay, date: Date, weather: WeatherCast | null) => Promise<void>
   /** 单天工具循环的轮次上限 */
   maxToolRounds: number
+  /**
+   * 逐天人工确认模式（V3）。为 true 时，每排完一天都会 interrupt 暂停，
+   * 等用户在前端确认后再排下一天——这是 LangGraph human-in-the-loop 的落点。
+   * 默认 false（全自动），保持与手写版一致的行为。
+   */
+  reviewMode: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +309,29 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       usedNightKinds: newNightKinds,
       previousDayState: { dayType: day.dayType, intensity: day.intensity },
       warnings: commuteWarnings,
+      // 供 review 模式展示给用户确认：一句话概括这一天的安排
+      pendingDaySummary: day.summary || `${day.items.length} 个地点（${day.dayType}）`,
     }
+  }
+
+  // ---- 节点：逐天人工确认（V3 human-in-the-loop） ---------------------------
+  // 只在 ctx.reviewMode 为 true 时才有存在意义：否则直接透传，等价于没有这个节点。
+  // interrupt 会暂停图执行，把 pendingDaySummary 抛给前端；前端用 Command(resume)
+  // 恢复后，节点把用户的决定（approved / regenerate）写回状态。
+  const reviewDayNode: GraphNode<typeof AgentGraphState> = async (state) => {
+    if (!ctx.reviewMode) return {}
+
+    const decision = interrupt({
+      dayIndex: state.dayIndex - 1,
+      summary: state.pendingDaySummary,
+      question: '这一天的安排是否满意？',
+    })
+
+    // decision: 'approved' 继续排下一天；'regenerate' 让调用方知道要重排（当前 V3 先只支持 approved）
+    if (decision !== 'approved') {
+      throw new Error('用户要求重排这一天（V3 暂仅支持确认通过）')
+    }
+    return { pendingDaySummary: null }
   }
 
   // ---- 节点：收尾 ----------------------------------------------------------
@@ -317,6 +345,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   }
 
   // ---- 条件边 --------------------------------------------------------------
+  // reviewDay 之后：还有下一天就回到 planDay，否则 finalize
   const shouldContinue: ConditionalEdgeRouter<{
     InputSchema: typeof AgentGraphState
     Nodes: 'planDay' | 'finalize'
@@ -327,10 +356,13 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   return new StateGraph(AgentGraphState)
     .addNode('resolveAnchor', resolveAnchorNode)
     .addNode('planDay', planDayNode)
+    .addNode('reviewDay', reviewDayNode)
     .addNode('finalize', finalizeNode)
     .addEdge(START, 'resolveAnchor')
     .addEdge('resolveAnchor', 'planDay')
-    .addConditionalEdges('planDay', shouldContinue, ['planDay', 'finalize'])
+    // planDay → reviewDay → 条件边：review 模式会 interrupt，非 review 模式透传
+    .addEdge('planDay', 'reviewDay')
+    .addConditionalEdges('reviewDay', shouldContinue, ['planDay', 'finalize'])
     .addEdge('finalize', END)
     .compile(checkpointer ? { checkpointer } : undefined)
 }

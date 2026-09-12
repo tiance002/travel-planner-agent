@@ -76,11 +76,38 @@ START → resolveAnchor → planDay ──条件边──┐
 
 ---
 
-## V3 —— Interrupt 人机协作（规划）
+## V3 —— Interrupt 逐天人工确认（human-in-the-loop）
 
-生成前确认摘要 + 换点人工审核。
+**目标**：用 LangGraph 的 `interrupt()` 实现「每排完一天暂停、等用户确认」的人机协作，这是手写版最难实现、图结构最自然表达的能力。
 
-## V4 —— 并行择优 + 回退纠错（规划）
+**实现**：
+- 新增 `reviewDay` 节点：`interrupt({ dayIndex, summary, question })` 暂停图执行，
+  把当天摘要抛给前端。
+- 状态新增 `pendingDaySummary` 字段（标量字符串，覆盖式）。
+- 上下文新增 `reviewMode` 布尔。false（默认）时 reviewDay 节点透传，行为与 V1/V2 完全一致；
+  true 时逐天暂停。
+- 新增 `resumeTripReview(tripId)`：用 `Command({ resume: 'approved' })` 恢复图，
+  从 interrupt 处继续排下一天（复用同一 thread_id = tripId，checkpointer 保证断点接续）。
+- 新增路由 `POST /trips/:id/review-confirm` 与 `generate` 的 `mode: 'review'`。
+- review 模式是图版专属：即使 `USE_LANGGRAPH` 未开，`mode=review` 也强制走图版。
+
+**关键语义澄清**：
+- `graph.invoke()` 在 interrupt 处返回，结果带 `__interrupt__` 数组——这**不是失败**，
+  所以 catch 分支不能把 status 设 failed。代码里显式检查 `__interrupt__`，把摘要写进
+  `genProgress`（`待确认：第N天 ...`），status 保持 generating。
+- resume 后可能又在下一轮的 reviewDay 暂停，所以 `resumeTripReview` 同样要处理
+  「再次中断」的情况。
+
+**验证**：
+- `npm run check:graph` 扩到 13/13（新增「interrupt 结构化负载」3 条断言）。
+- 端到端：`mode=review` 触发后，每天结束停在「待确认」，review-confirm 恢复，
+  循环直到全部排完。
+
+**提交**：（见 git log）
+
+---
+
+## V4 —— 并行多方案择优 + 回退纠错（规划）
 
 同一天 fan-out 并行生成多方案择优；某天失败自动回退。
 

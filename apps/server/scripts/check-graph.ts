@@ -164,6 +164,37 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// 测试 5：interrupt 携带结构化负载（V3 review 模式的基础）
+// ---------------------------------------------------------------------------
+
+console.log('\n--- interrupt 结构化负载（V3 逐天确认） ---')
+
+const ReviewState = new StateSchema({
+  dayIndex: z.number(),
+  summary: z.string(),
+})
+
+const reviewGraph = new StateGraph(ReviewState)
+  .addNode('planDay', async (state) => ({ summary: '西湖一日游：断桥 → 苏堤 → 雷峰塔' }))
+  .addNode('reviewDay', async (state) => {
+    const decision = interrupt({ dayIndex: state.dayIndex, summary: state.summary })
+    return { summary: `confirmed:${decision}` }
+  })
+  .addEdge(START, 'planDay')
+  .addEdge('planDay', 'reviewDay')
+  .addEdge('reviewDay', END)
+  .compile({ checkpointer: new MemorySaver() })
+
+const reviewCfg = { configurable: { thread_id: 'review-test' } }
+const rv1 = await reviewGraph.invoke({ dayIndex: 2, summary: '' }, reviewCfg)
+const payload = (rv1.__interrupt__?.[0] as { value?: { dayIndex?: number; summary?: string } })?.value
+check('interrupt 负载带 dayIndex', payload?.dayIndex, 2)
+check('interrupt 负载带摘要', payload?.summary, '西湖一日游：断桥 → 苏堤 → 雷峰塔')
+
+const rv2 = await reviewGraph.invoke(new Command({ resume: 'approved' }), reviewCfg)
+check('resume 后 decision 回填到节点', rv2.summary, 'confirmed:approved')
+
+// ---------------------------------------------------------------------------
 // 汇总
 // ---------------------------------------------------------------------------
 

@@ -60,6 +60,11 @@ export const AgentGraphState = new StateSchema({
   }),
   /** 是否已全部排完。标量，覆盖式 */
   finished: z.boolean(),
+  /**
+   * 刚排好的这一天的摘要（供 review 模式下 interrupt 展示给用户确认）。
+   * 标量字符串，覆盖式。null 表示没有待确认的摘要。
+   */
+  pendingDaySummary: z.string().nullable(),
 })
 
 /** 从图状态里取字段的类型，供节点函数标注参数 */

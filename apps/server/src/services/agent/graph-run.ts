@@ -8,6 +8,7 @@
 // 便于逐版本对比验证，最终稳定后再切流、删旧版。
 
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite'
+import { Command } from '@langchain/langgraph'
 import path from 'node:path'
 import { prisma } from '../../db'
 import { getWeather, type Poi, type WeatherCast } from '../amap'
@@ -47,10 +48,16 @@ function getCheckpointer(): SqliteSaver {
 /** 生成图入口 */
 export async function generateTripWithGraph(
   tripId: string,
-  options: { mode?: 'continue' | 'restart' } = {},
+  options: { mode?: 'continue' | 'restart' | 'review' } = {},
 ): Promise<void> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'continue'
+  // review 模式 = 从头重排 + 逐天人工确认（V3）。
+  // 语义上等价于 restart（清空旧安排）叠加 reviewMode（每排完一天暂停）。
+  // 这样用户点「逐天确认生成」时，一定是从第 1 天开始、逐天过一遍，
+  // 而不是在旧行程的残留上续跑。
+  const reviewMode = mode === 'review'
+  const effectiveMode: 'continue' | 'restart' = mode === 'restart' || reviewMode ? 'restart' : 'continue'
   const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
 
   const trip = await prisma.trip.findUnique({ where: { id: tripId } })
@@ -90,7 +97,7 @@ export async function generateTripWithGraph(
   const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
 
   // 断点续跑：先恢复已落库的天，算出「下一个要排的天」与跨天传导状态
-  if (mode === 'restart') {
+  if (effectiveMode === 'restart') {
     await prisma.tripDay.deleteMany({ where: { tripId } })
     log('已清空原有安排，从头生成')
   }
@@ -159,6 +166,7 @@ export async function generateTripWithGraph(
     log,
     persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
+    reviewMode,
   }
 
   // 构建图（闭包捕获 ctx），驱动执行。
@@ -182,9 +190,30 @@ export async function generateTripWithGraph(
         previousDayState,
         warnings: [],
         finished: false,
+        pendingDaySummary: null,
       },
       config,
     )
+
+    // review 模式：图在 reviewDay 的 interrupt 处暂停返回，result 里带 __interrupt__。
+    // 这时不是完成、也不是失败，而是「等待用户确认」——把待确认摘要写进
+    // genProgress 供前端展示，status 保持 generating，等用户调用 review 接口恢复。
+    const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
+    if (interrupts && interrupts.length > 0) {
+      const first = interrupts[0] as { value?: { dayIndex?: number; summary?: string } }
+      const dayIndex = first?.value?.dayIndex ?? startDay
+      const summary = first?.value?.summary ?? ''
+      await prisma.trip
+        .update({
+          where: { id: tripId },
+          data: {
+            genProgress: `待确认：第 ${dayIndex} 天 ${summary}`,
+          },
+        })
+        .catch(() => undefined)
+      log(`第 ${dayIndex} 天已暂停，等待用户确认`)
+      return
+    }
 
     const totalItems = await prisma.tripItem.count({ where: { tripDay: { tripId } } })
     log(
@@ -192,6 +221,106 @@ export async function generateTripWithGraph(
         `总耗时 ${Math.round((Date.now() - startedAt) / 1000)} 秒`,
     )
     void result
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    await prisma.trip
+      .update({ where: { id: tripId }, data: { status: 'failed', genError: msg } })
+      .catch(() => undefined)
+    throw new GraphGenerateError(msg)
+  }
+}
+
+/**
+ * review 模式下的恢复：用户在「待确认」后点了「确认采用」。
+ *
+ * 用同一个 thread_id（= tripId）+ Command({resume}) 让图从 reviewDay 的
+ * interrupt 处继续。因为 checkpointer 已把中断时的图状态（含 ctx 之外的
+ * 轻量状态）持久化，这里重新 build 图、重建 ctx（从 Prisma 恢复已排好的天），
+ * 图会从断点接着排下一天，而不是从头再来。
+ */
+export async function resumeTripReview(tripId: string): Promise<void> {
+  const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
+
+  const trip = await prisma.trip.findUnique({ where: { id: tripId } })
+  if (!trip) throw new GraphGenerateError('行程不存在')
+
+  const credentials = await getCredentialsForUser(trip.userId)
+  if (!credentials) throw new GraphGenerateError('还没有配置模型 API Key')
+
+  const report = createReporter(tripId)
+  const registry = new Map<string, Poi>()
+
+  const stayInfo = await loadStayPoi(trip)
+  if (stayInfo) registry.set(stayInfo.poi.poiId, stayInfo.poi)
+
+  const toolContext: ToolContext = {
+    cityName: trip.cityName,
+    cityAdcode: trip.cityAdcode,
+    registry,
+    report: (text) => report(text),
+  }
+
+  const basics: TripBasics = {
+    cityName: trip.cityName,
+    cityAdcode: trip.cityAdcode,
+    startDate: formatDate(trip.startDate),
+    days: trip.days,
+    travelers: trip.travelers,
+    preferences: safeParseArray(trip.preferences),
+    extraNeeds: safeParseArray(trip.extraNeeds),
+    budgetAmount: trip.budgetAmount,
+    budgetScope: trip.budgetScope === 'total' ? 'total' : 'per_person',
+  }
+
+  const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
+
+  const weatherByDate = new Map<string, WeatherCast>()
+  try {
+    const weather = await getWeather(trip.cityAdcode)
+    for (const cast of weather?.casts ?? []) weatherByDate.set(cast.date, cast)
+  } catch {
+    log('天气获取失败，本次按天气未知处理')
+  }
+
+  const ctx: AgentGraphContext = {
+    tripId,
+    credentials,
+    registry,
+    toolContext,
+    basics,
+    ban,
+    anchor: stayInfo?.poi ?? null,
+    weatherByDate,
+    report,
+    log,
+    persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
+    maxToolRounds: MAX_DAY_TOOL_ROUNDS,
+    reviewMode: true,
+  }
+
+  const graph = buildAgentGraph(ctx, getCheckpointer())
+  const config = { configurable: { thread_id: tripId } }
+
+  try {
+    const result = await graph.invoke(new Command({ resume: 'approved' }), config)
+
+    // 恢复后可能又在下一天的 reviewDay 暂停，继续写「待确认」
+    const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
+    if (interrupts && interrupts.length > 0) {
+      const first = interrupts[0] as { value?: { dayIndex?: number; summary?: string } }
+      const dayIndex = first?.value?.dayIndex ?? 1
+      const summary = first?.value?.summary ?? ''
+      await prisma.trip
+        .update({
+          where: { id: tripId },
+          data: { genProgress: `待确认：第 ${dayIndex} 天 ${summary}` },
+        })
+        .catch(() => undefined)
+      log(`第 ${dayIndex} 天已暂停，继续等待用户确认`)
+      return
+    }
+
+    log('review 模式全部确认完毕')
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     await prisma.trip
