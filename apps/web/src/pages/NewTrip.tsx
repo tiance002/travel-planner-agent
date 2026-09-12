@@ -154,6 +154,30 @@ interface StepOneForm {
 /** 住宿选择方式：自己选，或交给 AI 推荐中心区域 */
 type StayMode = 'manual' | 'undecided'
 
+/** 并行择优卡片上的单个候选方案（服务端 genReview 载荷） */
+interface ReviewCandidate {
+  label: 'A' | 'B'
+  summary: string
+  /** 景点评分均值（一位小数） */
+  ratingAvg: number
+  /** 全天通勤总分钟数（估算） */
+  commuteMinutes: number
+  spotCount: number
+  pros: string[]
+  cons: string[]
+}
+
+/** 图版交互模式的服务端待裁决载荷 */
+interface ReviewRequest {
+  kind: 'confirm' | 'choose'
+  dayIndex: number
+  totalDays: number
+  /** kind=confirm 时的一句话摘要 */
+  summary?: string
+  /** kind=choose 时的两个候选 */
+  candidates?: ReviewCandidate[]
+}
+
 export default function NewTrip() {
   const { message } = App.useApp()
   const { token } = antdTheme.useToken()
@@ -189,8 +213,10 @@ export default function NewTrip() {
   // --- 图版专属的两个开关（LangGraph 编排） ---------------------------------
   /** 逐天人工确认：每排完一天暂停，展示摘要，等用户点头再排下一天 */
   const [reviewEnabled, setReviewEnabled] = useState(false)
-  /** 当前是否停在「待确认」状态。值就是那天的一句话摘要 */
-  const [reviewPending, setReviewPending] = useState<string | null>(null)
+  /** 服务端发来的待裁决载荷（genReview JSON 解析）。null 表示没有暂停等待裁决 */
+  const [reviewRequest, setReviewRequest] = useState<ReviewRequest | null>(null)
+  /** 驳回时填的修改意见（可空 = 不满意但没具体说，AI 会换一批地点重排） */
+  const [reviewFeedback, setReviewFeedback] = useState('')
   const [confirming, setConfirming] = useState(false)
   /** 并行择优：每天并行 2 套方案打分选最优。成本与耗时约翻倍，默认关 */
   const [parallelEnabled, setParallelEnabled] = useState(false)
@@ -343,16 +369,25 @@ export default function NewTrip() {
           genProgress: string | null
           genError: string | null
           genDayIndex: number | null
+          genReview: string | null
         }
       }>(`/trips/${tripId}`)
 
       const trip = data.trip
       setGenStatus(trip.status as 'draft' | 'generating' | 'ready' | 'failed')
-      const progressText = trip.genProgress ?? ''
-      setGenProgress(progressText)
-      // 图版 review 模式：进度文案以「待确认：」开头表示图暂停在 interrupt 上，
-      // 等用户确认后才排下一天。前缀由服务端写入，这里负责解析成结构化状态。
-      setReviewPending(progressText.startsWith('待确认：') ? progressText.slice(4) : null)
+      setGenProgress(trip.genProgress ?? '')
+      // 图版交互模式：genReview 是服务端 interrupt 的结构化载荷（JSON 字符串）。
+      // kind=confirm 单方案确认/驳回；kind=choose 双方案对比挑选。
+      // 解析失败按「没有待裁决内容」处理，不影响其它状态的展示。
+      let request: ReviewRequest | null = null
+      if (trip.genReview) {
+        try {
+          request = JSON.parse(trip.genReview) as ReviewRequest
+        } catch {
+          request = null
+        }
+      }
+      setReviewRequest(request)
       setGenError(trip.genError ?? '')
       setGenDayIndex(trip.genDayIndex ?? null)
 
@@ -384,7 +419,8 @@ export default function NewTrip() {
     const actualMode = reviewEnabled ? 'review' : mode
     setGenerating(true)
     setGenError('')
-    setReviewPending(null)
+    setReviewRequest(null)
+    setReviewFeedback('')
     setGenProgress(
       reviewEnabled
         ? '正在准备（逐天确认模式，每排完一天会暂停等你确认）'
@@ -409,17 +445,26 @@ export default function NewTrip() {
   }
 
   /**
-   * 逐天确认模式下的「确认采用」：让图从 interrupt 处恢复，接着排下一天。
-   * 轮询一直在跑（行程状态始终是 generating），确认后无需重新起轮询。
+   * 逐天确认/并行择优模式下的用户裁决：让图从 interrupt 处恢复。
+   *   - approve：确认采用（单方案）
+   *   - choose：采用指定方案（A/B）
+   *   - reject：驳回（附修改意见，AI 按意见重排这一天）
+   * 轮询一直在跑（行程状态始终是 generating），裁决后无需重新起轮询。
    */
-  async function confirmReview() {
+  async function confirmReview(answer: { decision: 'approve' | 'choose' | 'reject'; choice?: 'A' | 'B' }) {
     if (!savedTripId) return
     setConfirming(true)
     try {
-      await api.post(`/trips/${savedTripId}/review-confirm`, { parallel: parallelEnabled })
-      setReviewPending(null)
+      await api.post(`/trips/${savedTripId}/review-confirm`, {
+        decision: answer.decision,
+        choice: answer.choice,
+        feedback: answer.decision === 'reject' ? reviewFeedback.trim() || undefined : undefined,
+        parallel: parallelEnabled,
+      })
+      setReviewRequest(null)
+      setReviewFeedback('')
     } catch (err) {
-      setGenError(extractError(err, '确认失败，请稍后重试'))
+      setGenError(extractError(err, '操作失败，请稍后重试'))
     } finally {
       setConfirming(false)
     }
@@ -880,27 +925,121 @@ export default function NewTrip() {
             </div>
           </div>
 
-          {/* 逐天确认模式：图暂停在「待确认」上时弹出这张卡片，等用户点头 */}
-          {reviewPending && genStatus === 'generating' && (
-            <Alert
-              type="warning"
-              showIcon
-              style={{ marginBottom: 16 }}
-              data-testid="review-pending"
-              title="AI 暂停等待你的确认"
-              description={reviewPending}
-              action={
+          {/* 图版交互模式：图暂停在 interrupt 上时弹出裁决卡片。
+              kind=confirm 单方案（确认/驳回），kind=choose 双方案（挑一个/都驳回）。
+              驳回可附修改意见，AI 会按意见重排这一天。 */}
+          {reviewRequest && genStatus === 'generating' && (
+            <div
+              data-testid="review-card"
+              style={{
+                border: `1px solid ${token.colorWarningBorder}`,
+                borderLeft: `3px solid ${token.colorWarning}`,
+                borderRadius: 6,
+                padding: '14px 16px',
+                marginBottom: 16,
+                background: token.colorWarningBg,
+              }}
+            >
+              <Typography.Text strong style={{ fontSize: 14 }}>
+                {reviewRequest.kind === 'choose'
+                  ? `第 ${reviewRequest.dayIndex}/${reviewRequest.totalDays} 天：两个方案请你挑一个`
+                  : `第 ${reviewRequest.dayIndex}/${reviewRequest.totalDays} 天已排好，等待你的确认`}
+              </Typography.Text>
+
+              {reviewRequest.kind === 'confirm' && reviewRequest.summary && (
+                <Typography.Paragraph style={{ marginTop: 8, marginBottom: 8 }}>
+                  {reviewRequest.summary}
+                </Typography.Paragraph>
+              )}
+
+              {/* 双方案对比：优缺点与评分/通勤数据都来自已验证的高德数据，
+                  不掺 AI 的主观形容，用户看到的是可复核的数字 */}
+              {reviewRequest.kind === 'choose' && reviewRequest.candidates && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, margin: '10px 0' }}>
+                  {reviewRequest.candidates.map((c) => (
+                    <div
+                      key={c.label}
+                      data-testid={`review-candidate-${c.label}`}
+                      style={{
+                        border: `1px solid ${token.colorBorder}`,
+                        borderRadius: 6,
+                        padding: '10px 12px',
+                        background: token.colorBgContainer,
+                      }}
+                    >
+                      <Space size={8} style={{ marginBottom: 6 }}>
+                        <Tag color="blue">方案 {c.label}</Tag>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          评分均值 {c.ratingAvg} 分 ｜ 通勤约 {c.commuteMinutes} 分钟 ｜ {c.spotCount} 个景点
+                        </Typography.Text>
+                      </Space>
+                      <Typography.Paragraph style={{ marginBottom: 8, fontSize: 13 }}>
+                        {c.summary}
+                      </Typography.Paragraph>
+                      <div style={{ fontSize: 12.5 }}>
+                        {c.pros.map((p) => (
+                          <div key={p} style={{ color: token.colorSuccess }}>＋ {p}</div>
+                        ))}
+                        {c.cons.map((cItem) => (
+                          <div key={cItem} style={{ color: token.colorWarning }}>－ {cItem}</div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Input.TextArea
+                rows={2}
+                value={reviewFeedback}
+                onChange={(e) => setReviewFeedback(e.target.value)}
+                placeholder="不满意？写下修改意见（可选），例如「不要博物馆，多安排户外」，AI 会按意见重排这一天"
+                maxLength={500}
+                style={{ marginBottom: 10 }}
+              />
+
+              <Space wrap>
+                {reviewRequest.kind === 'confirm' ? (
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={confirming}
+                    data-testid="review-confirm-btn"
+                    onClick={() => void confirmReview({ decision: 'approve' })}
+                  >
+                    确认采用，继续排下一天
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      type="primary"
+                      size="small"
+                      loading={confirming}
+                      data-testid="review-choose-a-btn"
+                      onClick={() => void confirmReview({ decision: 'choose', choice: 'A' })}
+                    >
+                      采用方案 A
+                    </Button>
+                    <Button
+                      size="small"
+                      loading={confirming}
+                      data-testid="review-choose-b-btn"
+                      onClick={() => void confirmReview({ decision: 'choose', choice: 'B' })}
+                    >
+                      采用方案 B
+                    </Button>
+                  </>
+                )}
                 <Button
-                  type="primary"
                   size="small"
                   loading={confirming}
-                  data-testid="review-confirm-btn"
-                  onClick={() => void confirmReview()}
+                  data-testid="review-reject-btn"
+                  onClick={() => void confirmReview({ decision: 'reject' })}
                 >
-                  确认，继续排下一天
+                  需要调整，按意见重新安排
                 </Button>
-              }
-            />
+              </Space>
+            </div>
           )}
 
           <Space style={{ marginBottom: 16 }} wrap>
@@ -944,8 +1083,8 @@ export default function NewTrip() {
                 showIcon
                 title={
                   genStatus === 'generating'
-                    ? reviewPending
-                      ? 'AI 正在等待你的确认（见上方卡片）'
+                    ? reviewRequest
+                      ? 'AI 正在等待你的裁决（见上方卡片）'
                       : `AI 正在排程：${genProgress || '准备中'}`
                     : `已排好 ${doneDays}/${totalDays} 天`
                 }

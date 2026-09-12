@@ -76,6 +76,24 @@ export const AgentGraphState = new StateSchema({
    * 覆盖式。
    */
   dayError: z.string().nullable(),
+  /**
+   * 用户驳回当前天时填的修改意见（逐天确认模式）。
+   * 非 null 时条件边会把图路由回 planDay，排程节点把意见注入提示词重排这一天。
+   * 成功推进后必须清回 null，否则会无限重排。覆盖式。
+   */
+  dayFeedback: z.string().nullable(),
+  /**
+   * 待用户裁决的单天方案（交互模式下 planDay 不再直接落库，而是挂起在这里等
+   * reviewDay 节点问过用户之后再提交）。结构 { day, warnings, summary }。
+   * PlannedDay 是纯 JSON 对象，可以安全进 checkpointer。覆盖式。
+   */
+  pendingDay: z.any().nullable(),
+  /**
+   * 并行择优模式下生成的候选方案列表（含展示用的优缺点与打分数据）。
+   * 每项 { label, summary, ratingAvg, commuteMinutes, spotCount, pros, cons, warnings, day }。
+   * 非 null 表示等待用户在 A/B 中挑一个。覆盖式。
+   */
+  pendingCandidates: z.any().nullable(),
 })
 
 /** 从图状态里取字段的类型，供节点函数标注参数 */

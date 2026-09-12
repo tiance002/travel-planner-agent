@@ -16,7 +16,7 @@ import { getCredentialsForUser } from '../llm'
 import { type PlannedDay } from './scheduler'
 import { nightKindOfText, parseDayTypeBan, type DayType, type Intensity } from './spot-rules'
 import { type ToolContext } from './tools'
-import { buildAgentGraph, type AgentGraphContext } from './graph'
+import { buildAgentGraph, type AgentGraphContext, type ReviewAnswer } from './graph'
 import type { TripBasics } from './prompt'
 
 /** 生成失败时抛出，携带给用户看的中文原因 */
@@ -204,27 +204,20 @@ export async function generateTripWithGraph(
         pendingDaySummary: null,
         dayRetryCount: 0,
         dayError: null,
+        dayFeedback: null,
+        pendingDay: null,
+        pendingCandidates: null,
       },
       config,
     )
 
-    // review 模式：图在 reviewDay 的 interrupt 处暂停返回，result 里带 __interrupt__。
-    // 这时不是完成、也不是失败，而是「等待用户确认」——把待确认摘要写进
-    // genProgress 供前端展示，status 保持 generating，等用户调用 review 接口恢复。
+    // review/choose 交互模式：图在 reviewDay 的 interrupt 处暂停返回，result 里带
+    // __interrupt__。这时不是完成、也不是失败，而是「等待用户裁决」——
+    // 把结构化载荷写进 genReview（前端渲染确认卡片用），status 保持 generating，
+    // 等用户调用 review-confirm 接口恢复。
     const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
     if (interrupts && interrupts.length > 0) {
-      const first = interrupts[0] as { value?: { dayIndex?: number; summary?: string } }
-      const dayIndex = first?.value?.dayIndex ?? startDay
-      const summary = first?.value?.summary ?? ''
-      await prisma.trip
-        .update({
-          where: { id: tripId },
-          data: {
-            genProgress: `待确认：第 ${dayIndex} 天 ${summary}`,
-          },
-        })
-        .catch(() => undefined)
-      log(`第 ${dayIndex} 天已暂停，等待用户确认`)
+      await writeReviewInterrupt(tripId, interrupts[0], log)
       return
     }
 
@@ -237,10 +230,42 @@ export async function generateTripWithGraph(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     await prisma.trip
-      .update({ where: { id: tripId }, data: { status: 'failed', genError: msg } })
+      .update({
+        where: { id: tripId },
+        data: { status: 'failed', genError: msg, genReview: null },
+      })
       .catch(() => undefined)
     throw new GraphGenerateError(msg)
   }
+}
+
+/**
+ * 把 reviewDay interrupt 的载荷写进 trip（genReview 存 JSON，genProgress 存摘要文案）。
+ * 两种载荷：kind=confirm（单方案确认/驳回）、kind=choose（双方案对比挑选）。
+ */
+async function writeReviewInterrupt(
+  tripId: string,
+  interrupt: unknown,
+  log: (line: string) => void,
+): Promise<void> {
+  const value = (interrupt as { value?: Record<string, unknown> })?.value ?? {}
+  const dayIndex = Number(value.dayIndex) || 1
+  const kind = value.kind === 'choose' ? 'choose' : 'confirm'
+  const summary = typeof value.summary === 'string' ? value.summary : ''
+
+  await prisma.trip
+    .update({
+      where: { id: tripId },
+      data: {
+        genProgress:
+          kind === 'choose'
+            ? `待确认：第 ${dayIndex} 天，请在两个方案中选择`
+            : `待确认：第 ${dayIndex} 天 ${summary}`,
+        genReview: JSON.stringify(value),
+      },
+    })
+    .catch(() => undefined)
+  log(`第 ${dayIndex} 天已暂停，等待用户${kind === 'choose' ? '挑选方案' : '确认'}`)
 }
 
 /**
@@ -253,7 +278,7 @@ export async function generateTripWithGraph(
  */
 export async function resumeTripReview(
   tripId: string,
-  options: { parallelCandidates?: number } = {},
+  options: { answer?: ReviewAnswer; parallelCandidates?: number } = {},
 ): Promise<void> {
   const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
 
@@ -321,22 +346,34 @@ export async function resumeTripReview(
   const graph = buildAgentGraph(ctx, getCheckpointer())
   const config = { configurable: { thread_id: tripId } }
 
+  // 先撤下待确认卡片：从这一刻起到下一次 interrupt 之间，前端不该再显示旧卡片。
+  // 不清的话存在竞态——用户驳回后立刻轮询，读到的还是旧载荷，会误以为没变化。
+  await prisma.trip
+    .update({ where: { id: tripId }, data: { genReview: null } })
+    .catch(() => undefined)
+
+  // 防重入：图当前若没有挂起的 interrupt（例如 planDay 正在按意见重排），
+  // 这次 resume 是竞态的重复点击，静默忽略——绝不能让 LangGraph 从上一个
+  // 检查点重跑节点（实测会连着重排好几次）。
+  const snapshot = await graph.getState(config)
+  const hasPendingInterrupt = (snapshot.tasks ?? []).some(
+    (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
+  )
+  if (!hasPendingInterrupt) {
+    log('收到裁决但当前没有等待裁决的任务（重复点击或正在重排），忽略')
+    return
+  }
+
   try {
-    const result = await graph.invoke(new Command({ resume: 'approved' }), config)
+    // 用户的裁决（确认/挑选/驳回+意见）原样透传给图里的 reviewDay 节点。
+    // 兼容：没带 answer 的旧调用按「确认采用」处理。
+    const answer: ReviewAnswer = options.answer ?? { decision: 'approve' }
+    const result = await graph.invoke(new Command({ resume: answer }), config)
 
     // 恢复后可能又在下一天的 reviewDay 暂停，继续写「待确认」
     const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
     if (interrupts && interrupts.length > 0) {
-      const first = interrupts[0] as { value?: { dayIndex?: number; summary?: string } }
-      const dayIndex = first?.value?.dayIndex ?? 1
-      const summary = first?.value?.summary ?? ''
-      await prisma.trip
-        .update({
-          where: { id: tripId },
-          data: { genProgress: `待确认：第 ${dayIndex} 天 ${summary}` },
-        })
-        .catch(() => undefined)
-      log(`第 ${dayIndex} 天已暂停，继续等待用户确认`)
+      await writeReviewInterrupt(tripId, interrupts[0], log)
       return
     }
 
@@ -344,7 +381,10 @@ export async function resumeTripReview(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
     await prisma.trip
-      .update({ where: { id: tripId }, data: { status: 'failed', genError: msg } })
+      .update({
+        where: { id: tripId },
+        data: { status: 'failed', genError: msg, genReview: null },
+      })
       .catch(() => undefined)
     throw new GraphGenerateError(msg)
   }

@@ -263,6 +263,7 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
         status: 'generating',
         genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
         genError: null,
+        genReview: null,
       },
     })
 
@@ -282,7 +283,7 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
         await prisma.trip
           .update({
             where: { id: trip.id },
-            data: { status: 'failed', genProgress: null, genError: message },
+            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
           })
           .catch(() => undefined)
       })
@@ -293,7 +294,7 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
         await prisma.trip
           .update({
             where: { id: trip.id },
-            data: { status: 'failed', genProgress: null, genError: message },
+            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
           })
           .catch(() => undefined)
       })
@@ -323,17 +324,33 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
     }
 
     // 与 generate 一样，后台恢复，接口立刻返回。
+    // answer 携带用户的裁决：approve（确认采用）/ choose（选 A/B）/ reject（驳回，可附意见）。
     // parallel 由前端一并传回：确认后继续排的后续天，保持同样的并行设置。
-    const parsedConfirm = z.object({ parallel: z.boolean().default(false) }).safeParse(req.body ?? {})
+    const parsedConfirm = z
+      .object({
+        decision: z.enum(['approve', 'choose', 'reject']).default('approve'),
+        choice: z.enum(['A', 'B']).optional(),
+        feedback: z.string().max(500).optional(),
+        parallel: z.boolean().default(false),
+      })
+      .safeParse(req.body ?? {})
+    const confirmBody = parsedConfirm.success
+      ? parsedConfirm.data
+      : { decision: 'approve' as const, choice: undefined, feedback: undefined, parallel: false }
     void resumeTripReview(trip.id, {
-      parallelCandidates: parsedConfirm.success && parsedConfirm.data.parallel ? 2 : 1,
+      answer: {
+        decision: confirmBody.decision,
+        choice: confirmBody.choice,
+        feedback: confirmBody.feedback,
+      },
+      parallelCandidates: confirmBody.parallel ? 2 : 1,
     }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '确认失败'
       console.error(`[生成 ${trip.id}] 确认失败：${message}`)
       await prisma.trip
         .update({
           where: { id: trip.id },
-          data: { status: 'failed', genProgress: null, genError: message },
+          data: { status: 'failed', genProgress: null, genError: message, genReview: null },
         })
         .catch(() => undefined)
     })
