@@ -7,7 +7,6 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
-import { generateTrip } from '../services/agent'
 import { generateTripWithGraph, resumeTripReview } from '../services/agent/graph-run'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
@@ -270,35 +269,19 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
     // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
     // 失败时把原因写进 genError，前端就能直接展示给用户看。
     //
-    // 环境变量 USE_LANGGRAPH=1 时走 LangGraph 图编排（V1 起的并行重写），
-    // 否则走手写版。两版并存，便于逐版本对比验证，稳定后再默认切到图版。
-    // review 模式（逐天人工确认）与并行择优都是图版专属能力，强制走图版。
+    // 编排只有 LangGraph 图版一条路径了（手写版 index.ts 已删，能力被完全覆盖：
+    // 节点级断点、逐天确认/驳回、并行双方案、失败重试都是图版专属）。
     const parallelCandidates = parsed.data.parallel ? 2 : 1
-    const useGraph =
-      process.env.USE_LANGGRAPH === '1' || mode === 'review' || parallelCandidates > 1
-    if (useGraph) {
-      void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
-        const message = error instanceof Error ? error.message : '生成失败'
-        console.error(`[生成 ${trip.id}] 失败：${message}`)
-        await prisma.trip
-          .update({
-            where: { id: trip.id },
-            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
-          })
-          .catch(() => undefined)
-      })
-    } else {
-      void generateTrip(trip.id, { mode }).catch(async (error: unknown) => {
-        const message = error instanceof Error ? error.message : '生成失败'
-        console.error(`[生成 ${trip.id}] 失败：${message}`)
-        await prisma.trip
-          .update({
-            where: { id: trip.id },
-            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
-          })
-          .catch(() => undefined)
-      })
-    }
+    void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
+      const message = error instanceof Error ? error.message : '生成失败'
+      console.error(`[生成 ${trip.id}] 失败：${message}`)
+      await prisma.trip
+        .update({
+          where: { id: trip.id },
+          data: { status: 'failed', genProgress: null, genError: message, genReview: null },
+        })
+        .catch(() => undefined)
+    })
 
     res.status(202).json({ ok: true, status: 'generating', mode })
   } catch (err) {

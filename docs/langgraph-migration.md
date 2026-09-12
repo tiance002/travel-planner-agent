@@ -199,3 +199,10 @@ START → resolveAnchor → planDay ──条件边──┐
 2. **genDecisions 前端展示**：详情页加一个「AI 决策回看」折叠面板。
 3. **LangSmith 追踪**：配一个 Key 就能看到每一步的完整 trace，调试体验质变。
 4. **PostgreSQL 上线时**：checkpointer 从 SQLite 换 `@langchain/langgraph-checkpoint-postgres`。
+
+## 终章：手写版已删除
+
+图版经真实链路验证完全覆盖手写版能力（节点级断点、逐天确认/驳回重排、
+并行双方案、单天失败自动重试均为图版专属），`index.ts` 已删除，
+`USE_LANGGRAPH` 开关移除，编排只剩 LangGraph 图一条路径。
+如需回看手写版实现，git 历史里检索「feat(langgraph): V1」之前的提交。
