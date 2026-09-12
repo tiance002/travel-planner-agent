@@ -48,7 +48,14 @@ function getCheckpointer(): SqliteSaver {
 /** 生成图入口 */
 export async function generateTripWithGraph(
   tripId: string,
-  options: { mode?: 'continue' | 'restart' | 'review' } = {},
+  options: {
+    mode?: 'continue' | 'restart' | 'review'
+    /**
+     * 并行候选方案数（V4 并行择优）。前端有开关，勾上时传 2；
+     * 不传则退回环境变量 PARALLEL_CANDIDATES，再退回 1（不并行）。
+     */
+    parallelCandidates?: number
+  } = {},
 ): Promise<void> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'continue'
@@ -168,8 +175,8 @@ export async function generateTripWithGraph(
     persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
     reviewMode,
-    // V4 并行择优：环境变量可开，默认 1（不并行，成本与手写版一致）
-    parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
+    // V4 并行择优：优先用前端传来的开关值，未传则退回环境变量，默认 1（不并行）
+    parallelCandidates: options.parallelCandidates ?? Number(process.env.PARALLEL_CANDIDATES ?? 1),
     recordDecision,
   }
 
@@ -244,7 +251,10 @@ export async function generateTripWithGraph(
  * 轻量状态）持久化，这里重新 build 图、重建 ctx（从 Prisma 恢复已排好的天），
  * 图会从断点接着排下一天，而不是从头再来。
  */
-export async function resumeTripReview(tripId: string): Promise<void> {
+export async function resumeTripReview(
+  tripId: string,
+  options: { parallelCandidates?: number } = {},
+): Promise<void> {
   const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
 
   const trip = await prisma.trip.findUnique({ where: { id: tripId } })
@@ -304,7 +314,7 @@ export async function resumeTripReview(tripId: string): Promise<void> {
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
     reviewMode: true,
     // 恢复路径沿用与首次生成相同的并行配置
-    parallelCandidates: Number(process.env.PARALLEL_CANDIDATES ?? 1),
+    parallelCandidates: options.parallelCandidates ?? Number(process.env.PARALLEL_CANDIDATES ?? 1),
     recordDecision,
   }
 

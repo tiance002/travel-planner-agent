@@ -30,6 +30,7 @@ import {
   Space,
   Spin,
   Steps,
+  Switch,
   Tag,
   Typography,
   theme as antdTheme,
@@ -185,6 +186,15 @@ export default function NewTrip() {
   const [genDayIndex, setGenDayIndex] = useState<number | null>(null)
   const pollTimer = useRef<number | null>(null)
 
+  // --- 图版专属的两个开关（LangGraph 编排） ---------------------------------
+  /** 逐天人工确认：每排完一天暂停，展示摘要，等用户点头再排下一天 */
+  const [reviewEnabled, setReviewEnabled] = useState(false)
+  /** 当前是否停在「待确认」状态。值就是那天的一句话摘要 */
+  const [reviewPending, setReviewPending] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  /** 并行择优：每天并行 2 套方案打分选最优。成本与耗时约翻倍，默认关 */
+  const [parallelEnabled, setParallelEnabled] = useState(false)
+
   // 用户改了城市名，之前解析的结果就作废了，必须重新解析
   function handleValuesChange(changed: Partial<StepOneForm>) {
     if ('cityName' in changed) setResolvedCity(null)
@@ -338,7 +348,11 @@ export default function NewTrip() {
 
       const trip = data.trip
       setGenStatus(trip.status as 'draft' | 'generating' | 'ready' | 'failed')
-      setGenProgress(trip.genProgress ?? '')
+      const progressText = trip.genProgress ?? ''
+      setGenProgress(progressText)
+      // 图版 review 模式：进度文案以「待确认：」开头表示图暂停在 interrupt 上，
+      // 等用户确认后才排下一天。前缀由服务端写入，这里负责解析成结构化状态。
+      setReviewPending(progressText.startsWith('待确认：') ? progressText.slice(4) : null)
       setGenError(trip.genError ?? '')
       setGenDayIndex(trip.genDayIndex ?? null)
 
@@ -359,23 +373,55 @@ export default function NewTrip() {
    * mode 有两种：continue 保留已经排好的天，从第一个空缺的天接着排；
    * restart 清空已有安排从第 1 天重来。服务端是按天生成的，
    * 所以中途失败时用户可以先「继续」，不必把已经排好的几天一起废掉。
+   *
+   * 勾了「逐天人工确认」时走图版专属的 review 模式（等价于从头重排 +
+   * 每天暂停等确认），此时「继续生成」没有意义（见渲染处的隐藏逻辑）。
+   * 「并行择优」作为独立开关随请求带给服务端，由它决定是否强制走图版。
    */
   async function startGenerate(mode: 'continue' | 'restart') {
     if (!savedTripId) return
 
+    const actualMode = reviewEnabled ? 'review' : mode
     setGenerating(true)
     setGenError('')
-    setGenProgress(mode === 'restart' ? '正在准备（重新生成）' : '正在准备')
+    setReviewPending(null)
+    setGenProgress(
+      reviewEnabled
+        ? '正在准备（逐天确认模式，每排完一天会暂停等你确认）'
+        : mode === 'restart'
+          ? '正在准备（重新生成）'
+          : '正在准备',
+    )
     setGenStatus('generating')
-    if (mode === 'restart') setGenDayIndex(null)
+    if (actualMode !== 'continue') setGenDayIndex(null)
 
     try {
-      await api.post(`/trips/${savedTripId}/generate`, { mode })
+      await api.post(`/trips/${savedTripId}/generate`, {
+        mode: actualMode,
+        parallel: parallelEnabled,
+      })
       void pollGeneration(savedTripId)
     } catch (err) {
       setGenError(extractError(err, '触发失败，请稍后重试'))
       setGenerating(false)
       setGenStatus('failed')
+    }
+  }
+
+  /**
+   * 逐天确认模式下的「确认采用」：让图从 interrupt 处恢复，接着排下一天。
+   * 轮询一直在跑（行程状态始终是 generating），确认后无需重新起轮询。
+   */
+  async function confirmReview() {
+    if (!savedTripId) return
+    setConfirming(true)
+    try {
+      await api.post(`/trips/${savedTripId}/review-confirm`, { parallel: parallelEnabled })
+      setReviewPending(null)
+    } catch (err) {
+      setGenError(extractError(err, '确认失败，请稍后重试'))
+    } finally {
+      setConfirming(false)
     }
   }
 
@@ -791,8 +837,74 @@ export default function NewTrip() {
             />
           )}
 
+          {/* 图版专属开关区。普通生成不受影响；勾选后才走 LangGraph 的增强能力 */}
+          <div
+            style={{
+              display: 'flex',
+              gap: 32,
+              flexWrap: 'wrap',
+              marginBottom: 16,
+              padding: '12px 16px',
+              borderRadius: 8,
+              border: '1px dashed rgba(58, 50, 38, 0.25)',
+            }}
+          >
+            <div>
+              <Space size={8}>
+                <Switch
+                  size="small"
+                  checked={reviewEnabled}
+                  onChange={setReviewEnabled}
+                  data-testid="review-toggle"
+                />
+                <Typography.Text strong>逐天人工确认</Typography.Text>
+              </Space>
+              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 2, maxWidth: 300 }}>
+                每排完一天就暂停，展示当天摘要，等你确认后再排下一天（生成会从头开始）
+              </div>
+            </div>
+            <div>
+              <Space size={8}>
+                <Switch
+                  size="small"
+                  checked={parallelEnabled}
+                  onChange={setParallelEnabled}
+                  data-testid="parallel-toggle"
+                />
+                <Typography.Text strong>并行择优</Typography.Text>
+                {parallelEnabled && <Tag color="orange">消耗与耗时约翻倍</Tag>}
+              </Space>
+              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 2, maxWidth: 300 }}>
+                每天并行生成 2 套方案，按评分与通勤打分选最优再落库
+              </div>
+            </div>
+          </div>
+
+          {/* 逐天确认模式：图暂停在「待确认」上时弹出这张卡片，等用户点头 */}
+          {reviewPending && genStatus === 'generating' && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              data-testid="review-pending"
+              title="AI 暂停等待你的确认"
+              description={reviewPending}
+              action={
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={confirming}
+                  data-testid="review-confirm-btn"
+                  onClick={() => void confirmReview()}
+                >
+                  确认，继续排下一天
+                </Button>
+              }
+            />
+          )}
+
           <Space style={{ marginBottom: 16 }} wrap>
-            {canContinue && (
+            {canContinue && !reviewEnabled && (
               <Button
                 type="primary"
                 data-testid="generate-continue-btn"
@@ -803,14 +915,22 @@ export default function NewTrip() {
               </Button>
             )}
             <Button
-              type={canContinue ? 'default' : 'primary'}
+              type={canContinue && !reviewEnabled ? 'default' : 'primary'}
               data-testid="generate-btn"
               loading={generating}
               onClick={() =>
                 void startGenerate(genStatus === 'ready' || doneDays > 0 ? 'restart' : 'continue')
               }
             >
-              {genStatus === 'ready' ? '重新生成' : doneDays > 0 ? '从头重新生成' : '开始生成行程'}
+              {reviewEnabled
+                ? genStatus === 'ready' || doneDays > 0
+                  ? '重新逐天确认生成'
+                  : '开始生成（逐天确认）'
+                : genStatus === 'ready'
+                  ? '重新生成'
+                  : doneDays > 0
+                    ? '从头重新生成'
+                    : '开始生成行程'}
             </Button>
             {generating && (
               <Typography.Text type="secondary">生成在服务端进行，请勿关闭当前账号的会话</Typography.Text>
@@ -824,7 +944,9 @@ export default function NewTrip() {
                 showIcon
                 title={
                   genStatus === 'generating'
-                    ? `AI 正在排程：${genProgress || '准备中'}`
+                    ? reviewPending
+                      ? 'AI 正在等待你的确认（见上方卡片）'
+                      : `AI 正在排程：${genProgress || '准备中'}`
                     : `已排好 ${doneDays}/${totalDays} 天`
                 }
                 description={

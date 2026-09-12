@@ -223,6 +223,11 @@ const STALE_GENERATING_MS = 10 * 60 * 1000
 //   restart  —— 清空已有安排，从第 1 天重新排（用户点「重新生成」时用）
 const generateSchema = z.object({
   mode: z.enum(['continue', 'restart', 'review']).default('continue'),
+  /**
+   * 并行择优开关（V4，图版专属）。勾上时每天并行生成 2 套方案再择优，
+   * 模型消耗与耗时约翻倍——这个提醒由前端展示，后端只负责照做。
+   */
+  parallel: z.boolean().default(false),
 })
 
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
@@ -266,10 +271,12 @@ tripsRouter.post('/:id/generate', async (req, res, next) => {
     //
     // 环境变量 USE_LANGGRAPH=1 时走 LangGraph 图编排（V1 起的并行重写），
     // 否则走手写版。两版并存，便于逐版本对比验证，稳定后再默认切到图版。
-    // review 模式（逐天人工确认）是 V3 图版专属能力，手写版不支持，强制走图版。
-    const useGraph = process.env.USE_LANGGRAPH === '1' || mode === 'review'
+    // review 模式（逐天人工确认）与并行择优都是图版专属能力，强制走图版。
+    const parallelCandidates = parsed.data.parallel ? 2 : 1
+    const useGraph =
+      process.env.USE_LANGGRAPH === '1' || mode === 'review' || parallelCandidates > 1
     if (useGraph) {
-      void generateTripWithGraph(trip.id, { mode }).catch(async (error: unknown) => {
+      void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
         const message = error instanceof Error ? error.message : '生成失败'
         console.error(`[生成 ${trip.id}] 失败：${message}`)
         await prisma.trip
@@ -315,8 +322,12 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
       return
     }
 
-    // 与 generate 一样，后台恢复，接口立刻返回
-    void resumeTripReview(trip.id).catch(async (error: unknown) => {
+    // 与 generate 一样，后台恢复，接口立刻返回。
+    // parallel 由前端一并传回：确认后继续排的后续天，保持同样的并行设置。
+    const parsedConfirm = z.object({ parallel: z.boolean().default(false) }).safeParse(req.body ?? {})
+    void resumeTripReview(trip.id, {
+      parallelCandidates: parsedConfirm.success && parsedConfirm.data.parallel ? 2 : 1,
+    }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '确认失败'
       console.error(`[生成 ${trip.id}] 确认失败：${message}`)
       await prisma.trip
