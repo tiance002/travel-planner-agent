@@ -135,6 +135,12 @@ export default function AppLayout() {
           style={{
             overflowY: isTripDetailPage ? 'hidden' : 'auto',
             padding: isTripDetailPage ? '20px 24px 16px' : '20px 24px 32px',
+            // 提前给滚动条预留 gutter：
+            //   antd 的 Select 等浮层打开时会锁 body 滚动（hidden overflow），
+            //   但很多浏览器在「已经从 hidden 切回 scroll」之间计算 scrollbar 占位不一致，
+            //   导致页面右侧多出 / 收回 16px，整页左右抖一下。
+            //   用 stable 提前把 gutter 留出来，浮层开关时滚动条的有无就不再影响布局。
+            scrollbarGutter: 'stable',
           }}
         >
           <Outlet />
