@@ -396,6 +396,38 @@ body {
 }
 
 /* -------------------------------------------------------------------- */
+/* antd 浮层（Select 下拉等）                                                */
+/*                                                                      */
+/* 两个连续问题的统一修法：                                              */
+/*   1. 用户报告「下拉滚到列表底之后，整页跟着滚」——原因是              */
+/*      虚拟列表没把"已经到边界"的信号传给浏览器，滚轮事件              */
+/*      继续冒泡，外层 layout 接管滚动，于是整页跟着动。                */
+/*   2. 下拉浮层在视口边缘时高度计算没预留余量，会撑出可视区，          */
+/*      用户看不到全部选项。                                            */
+/* CSS 标准里 `overscroll-behavior: contain` 就是为这种情况设计的：     */
+/* 它告诉浏览器「这个区域的滚动我内部消化，溢出不要传给祖先」。        */
+/* -------------------------------------------------------------------- */
+
+.ant-select-dropdown,
+.ant-picker-dropdown {
+  max-height: min(380px, calc(100vh - var(--ant-padding-sm, 8px) * 2));
+  /* 浮层挂到 body，与滚动容器不在同一个 flex 子树，
+     视口高度必须用 100vh 而不是父容器高度 */
+}
+
+/* 关键：让下拉内部的滚动「自包含」——到边界后不再冒泡 */
+.ant-select-dropdown .rc-virtual-list,
+.ant-select-dropdown .ant-select-item,
+.ant-select-dropdown [class*="virtual-list"] {
+  overscroll-behavior: contain;
+}
+
+/* 兜底：直接覆盖到下拉根节点，因为浮层可能换虚拟列表实现 */
+.ant-select-dropdown * {
+  overscroll-behavior: contain;
+}
+
+/* -------------------------------------------------------------------- */
 /* 表单：让录入区像「印在纸上的表格」，而不是一堆白色方块               */
 /*                                                                      */
 /* 背景色由 token 的 colorBgContainer 统一改成纸色，这里只需要处理       */
