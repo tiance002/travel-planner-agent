@@ -53,9 +53,28 @@ START → resolveAnchor → planDay ──条件边──┐
 
 ---
 
-## V2 —— Checkpointer 断点续跑（规划）
+## V2 —— Checkpointer 节点级断点续跑
 
-接入 SQLite checkpointer，把断点从「天级落库」升级到「节点级快照」。
+**目标**：把断点续跑从「天级落库」升级到「节点级快照」，进程崩溃重启后能从图中断的节点恢复。
+
+**实现**：
+- 引入 `@langchain/langgraph-checkpoint-sqlite@1.0.4`，`SqliteSaver.fromConnString()` 指向 `.debug/langgraph-checkpoints.sqlite`（已被 gitignore）。
+- checkpointer 做成**模块级惰性单例**（`getCheckpointer()`），避免每次生成 `fromConnString` 打开新连接导致文件句柄泄漏、WAL 争用。
+- `buildAgentGraph(ctx, checkpointer)` 接受可选 checkpointer，`compile({ checkpointer })`。
+
+**与手写版的本质区别**：
+- 手写版：进程崩溃 → 只能靠 Prisma「天级」恢复，当天排到一半的进度（已搜的景点、已算的通勤）全丢。
+- 图版：进程崩溃 → SQLite 里存着「排到第 N 天、图状态是什么」的快照，重启后用同一 thread_id 从断点继续。
+
+**验证**：
+- `npm run check:graph` 扩到 10/10（新增「SQLite 跨实例持久化恢复」2 条断言）。
+- 端到端：`USE_LANGGRAPH=1` 真实生成成功，checkpoint 文件正常落盘。
+
+**依赖**：新增 `@langchain/langgraph-checkpoint-sqlite@1.0.4`
+
+**提交**：（见 git log）
+
+---
 
 ## V3 —— Interrupt 人机协作（规划）
 

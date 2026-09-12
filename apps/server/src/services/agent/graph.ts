@@ -26,7 +26,7 @@
 //   3. 每个生成会话调用一次 buildAgentGraph(ctx)，图实例本身就是会话隔离的，
 //      闭包捕获的 ctx 天然不会并发串味。
 
-import { END, START, StateGraph, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
+import { END, START, StateGraph, type BaseCheckpointSaver, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
 import { prisma } from '../../db'
 import { type Poi } from '../amap'
 import { type ModelCredentials } from '../llm'
@@ -151,8 +151,12 @@ function addDays(dateStr: string, delta: number): string {
  * 构建并编译行程生成图。
  *
  * 每个生成会话调用一次：ctx 通过闭包捕获，图实例天然会话隔离，支持并发。
+ *
+ * @param ctx 外部上下文（凭证、登记表、天气、落库函数等）
+ * @param checkpointer 状态快照器。V1 不传（无断点），V2 起传 SqliteSaver，
+ *   让图状态在进程重启后也能恢复，实现「节点级」断点续跑。
  */
-export function buildAgentGraph(ctx: AgentGraphContext) {
+export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheckpointSaver) {
   // ---- 节点：锚点 ----------------------------------------------------------
   // 用户没选住宿时，让模型挑一个中心区域当锚点。
   // 在 V1 里锚点本可放在图外完成，但为了后续 V3 能对「锚点选择」做人工确认
@@ -328,5 +332,5 @@ export function buildAgentGraph(ctx: AgentGraphContext) {
     .addEdge('resolveAnchor', 'planDay')
     .addConditionalEdges('planDay', shouldContinue, ['planDay', 'finalize'])
     .addEdge('finalize', END)
-    .compile()
+    .compile(checkpointer ? { checkpointer } : undefined)
 }

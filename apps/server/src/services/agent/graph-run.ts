@@ -7,6 +7,8 @@
 // 住宿 POI 还原、落库、日期工具），只把编排核心换成图。这样两版并存，
 // 便于逐版本对比验证，最终稳定后再切流、删旧版。
 
+import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite'
+import path from 'node:path'
 import { prisma } from '../../db'
 import { getWeather, type Poi, type WeatherCast } from '../amap'
 import { getCredentialsForUser } from '../llm'
@@ -21,6 +23,26 @@ export class GraphGenerateError extends Error {}
 
 /** 单天工具循环轮次上限（与原 index.ts 一致） */
 const MAX_DAY_TOOL_ROUNDS = 14
+
+// ---------------------------------------------------------------------------
+// checkpointer 单例
+// ---------------------------------------------------------------------------
+
+/**
+ * 模块级惰性单例：SQLite checkpointer 是无状态的持久化基础设施，
+ * 不是会话数据，多个生成会话应复用同一个连接，而不是每次都 fromConnString
+ * 打开一个新连接（否则会泄漏文件句柄、且 WAL 模式下多连接争用）。
+ */
+let _checkpointer: SqliteSaver | null = null
+
+function getCheckpointer(): SqliteSaver {
+  if (!_checkpointer) {
+    _checkpointer = SqliteSaver.fromConnString(
+      path.resolve(import.meta.dirname, '../../../.debug/langgraph-checkpoints.sqlite'),
+    )
+  }
+  return _checkpointer
+}
 
 /** 生成图入口 */
 export async function generateTripWithGraph(
@@ -139,8 +161,13 @@ export async function generateTripWithGraph(
     maxToolRounds: MAX_DAY_TOOL_ROUNDS,
   }
 
-  // 构建图（闭包捕获 ctx），驱动执行
-  const graph = buildAgentGraph(ctx)
+  // 构建图（闭包捕获 ctx），驱动执行。
+  //
+  // V2：接入 SQLite checkpointer。图状态（进度、去重清单、传导状态）在每个
+  // 超级步被快照到 .debug/langgraph-checkpoints.sqlite，进程崩溃重启后，
+  // 用同一个 thread_id 重新 invoke 就能从图中断的节点恢复——这是手写版
+  // 「天级落库」做不到的「节点级」断点。
+  const graph = buildAgentGraph(ctx, getCheckpointer())
   const config = { configurable: { thread_id: tripId } }
 
   try {
