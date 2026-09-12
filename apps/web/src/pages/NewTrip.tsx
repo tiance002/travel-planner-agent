@@ -444,7 +444,21 @@ export default function NewTrip() {
 
       {/* ---------------- 第一步：基本信息 ---------------- */}
       {current === 0 && (
-        <Card>
+        <Card
+          // 第一步字段多，纵向堆起来会超过一屏。这里把「表单」装进一个限高、
+          // 内部滚动的容器，把「下一步 / 取消」钉在滚动区外面：无论字段多长，
+          // 都不会把整页撑破，外层步骤条、顶栏、侧栏稳如泰山，滚动条被关在卡片里。
+          style={{ display: 'flex', flexDirection: 'column' }}
+          styles={{ body: { display: 'flex', flexDirection: 'column', gap: 16 } }}
+        >
+          <div
+            style={{
+              maxHeight: 'calc(100vh - 320px)',
+              overflowY: 'auto',
+              paddingRight: 16,
+              scrollbarGutter: 'stable',
+            }}
+          >
           <Form
             form={form}
             layout="vertical"
@@ -572,8 +586,9 @@ export default function NewTrip() {
               />
             </Form.Item>
           </Form>
+          </div>
 
-          <Divider style={{ margin: '8px 0 16px' }} />
+          <Divider style={{ margin: 0 }} />
 
           <Space>
             <Button type="primary" onClick={() => void goToStayStep()}>
