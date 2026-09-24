@@ -2,16 +2,20 @@
 
 一个基于 AI Agent 的旅游规划 Web 应用。用户提交目的地、日期、天数、人数、偏好与预算后，系统以**住宿地点为锚点**，结合高德地图 POI 数据与实时天气，生成按天编排的行程，并在地图上展示路线、支持到点打卡。
 
-> 项目当前处于开发阶段，功能随迭代逐步开放。
+> 主体功能已完成（P1–P18），当前处于上线前的打磨阶段。
 
 ## 核心特性
 
-- **账号体系**：用户名 + 密码注册登录，JWT 会话，密码以 scrypt 加盐哈希存储
-- **四步新建行程**：基本信息 → 内嵌地图选定住宿 → AI 生成 → 结果确认
+- **账号体系**：用户名 + 密码注册登录，JWT 会话，密码以 scrypt 加盐哈希存储；支持修改头像、用户名与密码
+- **四步新建行程**：基本信息 → 内嵌地图选定住宿 → AI 生成 → 结果查看
+- **两档生成模式**：全自动一次排完，或「逐天确认」——每排完一天暂停，由你确认采用、驳回重排或二选一
+- **并行择优**：可选每天并行生成 2 套方案，按评分、通勤与景点数打分取优（模型消耗与耗时约翻倍）
 - **住宿锚点排程**：以住宿为圆心，直线距离排序聚类，高德路径规划生成真实路线与通勤时间
 - **智能组合**：每天景点上限 3 个，餐厅就近插入相邻景点之间，不单独占时段
 - **营业时间避坑**：结合 POI 营业时间过滤闭馆日
-- **地图联动**：按天展示路线，景点标记区分未打卡 / 已打卡状态
+- **地图联动**：按天展示路线，列表与地图标记双向联动
+- **换一个**：对某个地点不满意时，在前后两段通勤都 ≤40 分钟的范围内换同类地点
+- **到点打卡**：到地方手动点一下，已打卡条目置灰打勾，当天「当前目标」高亮
 - **自带模型密钥**：用户在设置中自行选择模型并填写 API Key，服务端加密托管
 
 ## 技术栈
@@ -22,7 +26,8 @@
 | 后端 | Node.js 22 · Express 5 · TypeScript · Prisma 7 |
 | 数据库 | 开发期 SQLite（经 libSQL driver adapter），上线目标 PostgreSQL |
 | 数据校验 | Zod 4 |
-| AI | CodeBuddy Agent SDK · OpenAI 兼容接口 |
+| AI 编排 | LangGraph 1.4（`@langchain/langgraph`）—— 状态图 + `interrupt` 人工介入，检查点落 SQLite |
+| 模型接入 | OpenAI 兼容接口（BYOK：用户自填厂商、`base_url`、模型名与 Key） |
 | 地图与 POI | 高德开放平台 Web 服务 API（地理编码 / POI 搜索 / 路径规划 / 天气） |
 | 长周期天气 | Open-Meteo（补高德 4 天预报上限，**规划中**） |
 
@@ -43,7 +48,21 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 | P2 | 高德能力接入、内嵌地图选住宿、新建行程向导前两步、行程草稿落库 | ✅ 已完成 |
 | P3 | 模型配置（用户自填 API Key，服务端 AES-256-GCM 加密托管） | ✅ 已完成 |
 | P4 | AI 生成行程（工具调用编排、每日排程规则、按天生成与断点续跑） | ✅ 已完成 |
-| P5 | 行程详情页（时间轴 + 地图联动 + 到点打卡） | ⏳ 待开发 |
+| P5 | 行程详情页（时间轴 + 地图联动 + 到点打卡） | ✅ 已完成 |
+| P6–P7 | 界面改版：布局重构、响应式适配、深色 / 浅色主题 | ✅ 已完成 |
+| P8 | 排程质量打磨，引入五种天型与强度区分（主题乐园整天、爬山只排 1 个等） | ✅ 已完成 |
+| P9 | 纸质手帐视觉主题落地 | ✅ 已完成 |
+| P10 | 编排迁移到 LangGraph：断点续跑 → `interrupt` 人工介入 → 驳回回退 → 并行择优 → 决策落库 | ✅ 已完成 |
+| P11 | 交互模式开关上屏（逐天确认 / 并行择优） | ✅ 已完成 |
+| P12 | 驳回重排与 A/B 方案对比 | ✅ 已完成 |
+| P13 | 通勤耗时恒为 0 的缺陷修复 | ✅ 已完成 |
+| P14 | 驾车 / 公交双通勤方案 | ✅ 已完成 |
+| P15 | 删除手写编排版本，编排收敛为 LangGraph 单一路径 | ✅ 已完成 |
+| P16 | 补充 `docs/项目学习文档.html` | ✅ 已完成 |
+| P17 | 死代码与冗余路径精简 | ✅ 已完成 |
+| P18 | 仓库隐私审计与凭据加固（移除硬编码测试密码） | ✅ 已完成 |
+
+> 下一步计划：高德 Key 的 IP / 域名白名单配置、注册邀请码与接口限流、数据库迁移至 PostgreSQL。
 
 ## 后端接口一览
 
@@ -55,7 +74,11 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 |---|---|---|
 | POST | `/api/auth/register` | 注册，成功后直接返回登录凭证 |
 | POST | `/api/auth/login` | 登录 |
-| GET | `/api/auth/me` | 查询当前登录用户 |
+| GET | `/api/auth/me` | 查询当前登录用户（含头像），用于刷新页面后确认登录态 |
+| PUT | `/api/auth/profile` | 修改用户名。会一并返回签给新用户名的新 token，无需重新登录 |
+| PUT | `/api/auth/password` | 修改密码，必须先验证旧密码 |
+| POST | `/api/auth/avatar` | 从预设列表中选定头像 |
+| POST | `/api/auth/avatar/upload` | 上传自定义头像（前端压缩成 dataURL，服务端解码后落到 `uploads/`） |
 
 ### 行程
 
@@ -65,8 +88,13 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 | POST | `/api/trips` | 创建行程草稿 |
 | GET | `/api/trips/:id` | 行程详情，含每日安排与条目 |
 | PATCH | `/api/trips/:id/stay` | 写入或清除住宿锚点 |
-| DELETE | `/api/trips/:id` | 删除行程 |
 | POST | `/api/trips/:id/generate` | 触发 AI 生成行程。立即返回 202，进度通过详情接口轮询 |
+| POST | `/api/trips/:id/review-confirm` | 「逐天确认 / 并行择优」模式下提交裁决：采用 / 二选一 / 驳回 |
+| POST | `/api/trips/:tripId/items/:itemId/checkin` | 到点打卡 |
+| DELETE | `/api/trips/:tripId/items/:itemId/checkin` | 取消打卡 |
+| GET | `/api/trips/:tripId/items/:itemId/alternatives` | 「换一个」候选列表：可行距离内的同类地点 |
+| PATCH | `/api/trips/:tripId/items/:itemId/replace` | 「换一个」执行替换 |
+| DELETE | `/api/trips/:id` | 删除行程 |
 
 ### 高德能力（后端代理，Web 服务 Key 不出服务端）
 
@@ -102,10 +130,17 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 |---|---|---|
 | POST | `/api/trips/:id/generate` | 触发生成。立即返回 202，真实进度与结果通过详情接口轮询 |
 
-请求体可选 `{ "mode": "continue" | "restart" }`：
+请求体可选 `{ "mode": "continue" | "restart" | "review", "parallel": boolean }`：
 
 - `continue`（默认）—— 保留已经排好的天，从第一个空缺的天接着排。失败后重试走这条，不会重跑已经完成的天。
 - `restart` —— 清空已有安排，从第 1 天重来。页面上点「重新生成」时用它。
+- `review` —— 清空重排，且**每排完一天就暂停等你确认**。点「开始生成（逐天确认）」时用它；
+  暂停后由 `POST /api/trips/:id/review-confirm` 提交裁决来恢复。
+- `parallel`（默认 `false`）—— 「并行择优」开关：每天并行生成 2 套方案，再按评分、通勤与景点数打分取优，
+  模型消耗与耗时约翻倍。
+
+`review-confirm` 的请求体为 `{ "decision": "approve" | "choose" | "reject", "choice"?: "A" | "B", "feedback"?: "...", "parallel"?: boolean }`：
+确认采用走 `approve`，二选一走 `choose` + `choice`，驳回则用 `reject` 并可附上意见（会写回图状态，由条件边触发该天重排）。
 
 > 生成是异步的：接口返回后服务端继续跑。行程状态走 `draft → generating → ready / failed`，
 > `genProgress` 是当前进度文案、`genDayIndex` 是已完成到第几天（前端每 2.5 秒轮询一次），
@@ -152,6 +187,46 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 在项目根目录执行 `npm run try:generate -- <用户名> <天数>`，
 终端会打印每一步工具调用与最终行程（末尾加 `restart` 可验证清空重排）。
 
+### 编排：LangGraph 状态图
+
+生成流程由一张状态图驱动（`apps/server/src/services/agent/graph.ts`），节点只有四个：
+
+```
+START → resolveAnchor → planDay → reviewDay ─┬─ 还有下一天 ──→ planDay
+                                             ├─ 当天失败 ────→ planDay（重试）
+                                             ├─ 被驳回 ──────→ planDay（按意见重排）
+                                             └─ 全部排完 ────→ finalize → END
+```
+
+- **resolveAnchor** —— 确定住宿锚点。用户没定住宿时，让模型推荐中心区域作为候选。
+- **planDay** —— 排一天。带工具跑一次完整循环。
+- **reviewDay** —— 裁决这一天。全自动模式下直接透传；交互模式下在这里 `interrupt` 暂停等人。
+- **finalize** —— 收尾，把行程状态置为 `ready` 并清空进度字段。
+
+两个值得知道的设计要点：
+
+1. **为什么用图而不是手写循环。** 这套流程需要「跑到一半停下来问用户，问完从原地继续」，
+   而「继续」发生时进程可能已经重启。LangGraph 的 **checkpoint（检查点）** 把每一步的图状态
+   持久化下来（`thread_id` 就是行程 id），暂停后能精确恢复。手写版本得自己实现这套状态序列化，
+   容易出错——**P15 已把手写编排整体删除，现在只有图这一条路径**。
+2. **交互模式下 `planDay` 不落库，只把方案挂在图状态里。** 因为驳回重排时，跨天状态
+   （已用地点清单、前一天强度、已用夜间类型）已经吸收了这一天的内容，先落库再重排会被
+   自己的旧地点「去重」掉、天型传导也会算错。**先挂起、裁决后再提交，状态永远不会倒退。**
+
+### 两种交互模式与并行择优
+
+| 模式 | 行为 | 适合 |
+|---|---|---|
+| 全自动（默认） | 一口气排完所有天，中途不打断 | 想快速拿到结果 |
+| **逐天确认** | 每排完一天暂停，展示这一天供你裁决：确认采用 / 二选一 / 驳回重排 | 对行程质量有要求，愿意多花几分钟 |
+
+**并行择优**是可以叠加在任一模式上的开关：每天同时生成 2 套方案，落地前按
+「评分均值 × 10 − 驾车通勤分钟 × 0.5 + 景点数 × 2」启发式打分取优；
+逐天确认模式下会把两套并排给你挑（A/B 对比）。代价是模型调用与耗时大致翻倍，所以默认关闭。
+
+驳回时填写的意见会写进图状态，条件边据此把流程送回 `planDay` 重排那一天——
+**只重排这一天，前面已经确认过的不受影响**。
+
 ## 目录结构
 
 ```
@@ -162,26 +237,40 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 │  │     ├─ amap/loader.ts          # 高德 JS API 动态加载（含安全密钥设置时机）
 │  │     ├─ api/                    # 后端接口调用封装
 │  │     ├─ components/AmapMap.tsx  # 地图的 React 封装
-│  │     └─ pages/                  # 登录、我的行程、新建行程、个人设置
+│  │     └─ pages/                  # 登录、行程列表、新建行程、行程详情、个人设置
 │  └─ server/                       # 后端服务
 │     ├─ prisma/schema.prisma       # 数据模型
 │     ├─ prisma.config.ts           # Prisma 7 的连接串配置
 │     └─ src/
-│        ├─ services/agent/         # AI 生成行程：工具层、模型调用循环、排程规则
+│        ├─ services/agent/         # AI 生成行程
+│        │  ├─ graph.ts             # LangGraph 状态图：节点、条件边、interrupt 裁决
+│        │  ├─ graph-state.ts       # 图状态定义（只放可序列化的轻量字段）
+│        │  ├─ graph-run.ts         # 图的启动与恢复入口
+│        │  ├─ scheduler.ts         # 每日排程规则与模型输出解析阶梯
+│        │  ├─ spot-rules.ts        # 选点准入与天型判定
+│        │  ├─ alternatives.ts      # 「换一个」的候选搜索与排序
+│        │  ├─ tools.ts             # 提供给模型的五个工具
+│        │  ├─ prompt.ts            # 提示词组装
+│        │  └─ model-client.ts      # OpenAI 兼容接口调用
 │        ├─ services/amap.ts        # 高德 Web 服务 API 封装与归一化
 │        ├─ services/cache.ts       # 内存 TTL 缓存
 │        ├─ services/llm.ts         # 模型凭据读取与连通性测试
 │        ├─ utils/vault.ts          # API Key 的 AES-256-GCM 加解密与掩码
 │        ├─ routes/                 # 认证 / 行程 / 高德代理 / 模型配置路由
 │        └─ middleware/auth.ts      # JWT 鉴权
-├─ docs/                            # 设计与方案文档
+├─ docs/
+│  ├─ 技术方案V1.html               # 初始技术方案
+│  ├─ 项目学习文档.html             # 项目原理与实现讲解
+│  ├─ langgraph-migration.md        # 编排迁移到 LangGraph 的过程记录
+│  └─ 部署指南.html                 # 部署与密钥配置说明
+├─ tools/smoke.mjs                  # 端到端冒烟测试脚本
 ├─ package.json                     # npm workspaces 根配置
 └─ apps/server/.env.example         # 环境变量模板
 ```
 
 ## 本地启动
 
-前置要求：Node.js 20 及以上。
+前置要求：Node.js 22 及以上。
 
 ```bash
 # 1. 安装依赖
@@ -285,12 +374,18 @@ npm run check:scheduler
 | 变量 | 说明 |
 |---|---|
 | `DATABASE_URL` | 数据库连接串，开发期为本地 SQLite 文件 |
+| `PORT` | 后端监听端口，默认 3001 |
 | `JWT_SECRET` | JWT 签名密钥，需自行生成一串足够随机的字符 |
 | `VAULT_MASTER_KEY` | 用户 API Key 的加密主密钥（32 字节，hex 编码） |
 | `AMAP_WEB_SERVICE_KEY` | 高德 Web 服务 Key，**仅后端使用，绝不下发前端** |
 | `AMAP_JS_KEY` | 高德 Web 端（JS API）Key，由后端下发给浏览器加载地图 |
 | `AMAP_JS_SECURITY_CODE` | 高德 JS API 安全密钥，与 JS Key 配套 |
-| `PORT` | 后端监听端口，默认 3001 |
+| `DEFAULT_MODEL_PROVIDER` | 兜底模型厂商名，仅当用户未配置自己的 Key 时生效 |
+| `DEFAULT_MODEL_BASE_URL` | 兜底模型接口地址（OpenAI 兼容），如 `https://api.deepseek.com/v1` |
+| `DEFAULT_MODEL_NAME` | 兜底模型名，如 `deepseek-chat` |
+| `DEFAULT_MODEL_API_KEY` | 兜底模型 Key。**填了它，所有未配置 Key 的账号都会消耗这个 Key 的余额**，生产环境请留空 |
+| `MODEL_MAX_OUTPUT_TOKENS` | 模型单次输出上限，默认 8192。调小可降低长行程被截断的风险 |
+| `PARALLEL_CANDIDATES` | 「并行择优」每天生成的候选方案数，默认 1（即不并行） |
 
 > 高德开放平台需要分别申请「Web 服务」与「Web 端(JS API)」两种类型的 Key，二者用途不同、不可混用。
 > 所有高德配置**只维护 `apps/server/.env` 这一份**，前端不单独存放，避免出现两处不一致。
