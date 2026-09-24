@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>部署指南 — 把应用交给别人用</title>
+<style>
+  :root {
+    --ink: #2b2b2b;
+    --ink-soft: #5a5a5a;
+    --line: #e2ded6;
+    --paper: #faf8f4;
+    --card: #ffffff;
+    --accent: #b5651d;
+    --accent-soft: #fdf4ec;
+    --warn-bg: #fff8e6;
+    --warn-line: #e0a800;
+    --ok-bg: #eef7f0;
+    --ok-line: #4c9a63;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 20px 80px;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.75;
+    font-size: 15px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 {
+    font-size: 27px;
+    margin: 0 0 8px;
+    letter-spacing: -0.3px;
+  }
+  .sub {
+    color: var(--ink-soft);
+    font-size: 14px;
+    margin-bottom: 34px;
+    padding-bottom: 20px;
+    border-bottom: 2px dashed var(--line);
+  }
+  h2 {
+    font-size: 19px;
+    margin: 42px 0 14px;
+    padding-left: 12px;
+    border-left: 4px solid var(--accent);
+  }
+  h3 { font-size: 15.5px; margin: 24px 0 10px; color: var(--ink); }
+  p { margin: 10px 0; }
+  code {
+    background: #f0ece5;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Consolas, "Courier New", monospace;
+    font-size: 13px;
+    color: #9a4a12;
+  }
+  pre {
+    background: #2f2b26;
+    color: #f0ebe3;
+    padding: 16px 18px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.65;
+    font-family: "SF Mono", Consolas, "Courier New", monospace;
+  }
+  pre code { background: none; color: inherit; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 14px;
+    background: var(--card);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  }
+  th, td {
+    text-align: left;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    background: #f5f1ea;
+    font-weight: 600;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+  }
+  tr:last-child td { border-bottom: none; }
+  .box {
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-left: 4px solid;
+    font-size: 14.5px;
+  }
+  .box.warn { background: var(--warn-bg); border-color: var(--warn-line); }
+  .box.ok { background: var(--ok-bg); border-color: var(--ok-line); }
+  .box strong { display: block; margin-bottom: 4px; }
+  ol.steps { padding-left: 0; list-style: none; counter-reset: s; }
+  ol.steps > li {
+    counter-increment: s;
+    position: relative;
+    padding-left: 40px;
+    margin: 16px 0;
+  }
+  ol.steps > li::before {
+    content: counter(s);
+    position: absolute;
+    left: 0;
+    top: 1px;
+    width: 26px;
+    height: 26px;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 26px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border: 1px solid #eed9c4;
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+  .muted { color: var(--ink-soft); font-size: 13.5px; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 36px 0; }
+  .lede {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 22px;
+    font-size: 15px;
+    margin-bottom: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>部署指南 — 把应用交给别人用</h1>
+  <div class="sub">
+    场景：你把这套服务部署到公网，别人访问网址就能用。你配置一次，所有用户共用。
+  </div>
+
+  <div class="lede">
+    <strong>最重要的一句话：别人什么都不用填，也不用改代码。</strong><br>
+    你只需要在 <code>apps/server/.env</code> 这个文件里填一次高德 Key，
+    之后所有访问你网址的用户自动共用它。
+  </div>
+
+  <h2>一、先分清两本账</h2>
+  <p>
+    这个项目有<strong>两层配置</strong>，各管各的。搞混了就会以为"设置页漏做了高德配置"——
+    其实它是故意不放在设置页的。
+  </p>
+  <table>
+    <thead>
+      <tr><th style="width:22%">层级</th><th style="width:20%">谁填</th><th style="width:22%">填在哪</th><th>包含什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>用户级</strong></td>
+        <td>每个用户自己</td>
+        <td>网页「设置」页</td>
+        <td>模型 API Key——各人烧各人的 token</td>
+      </tr>
+      <tr>
+        <td><strong>服务级</strong></td>
+        <td><strong>你</strong>（部署者）</td>
+        <td><code>.env</code> 文件，填一次</td>
+        <td>高德 Key、JWT_SECRET、加密主密钥、数据库地址</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>为什么高德 Key 不能放进设置页</h3>
+  <p>
+    三个现实原因，不是设计疏漏：
+  </p>
+  <p>
+    <strong>1. 申请门槛</strong>——高德 Key 需要注册高德开放平台并实名认证，让每个普通用户都走一遍不现实。<br>
+    <strong>2. 账单归属</strong>——高德按 Key 计费，谁部署谁承担配额。<br>
+    <strong>3. 域名白名单</strong>——JS Key 必须绑定具体域名（相当于门禁只认本小区的门牌号）。
+    别人就算拿到你的 Key，部署到自己的域名上地图也会直接报错，<strong>技术上借不了</strong>。
+  </p>
+
+  <h2>二、你只需要填这 3 个值</h2>
+  <p>文件位置：<code>apps/server/.env</code>（若不存在，从 <code>.env.example</code> 复制一份改名）</p>
+  <table>
+    <thead>
+      <tr><th style="width:32%">变量名</th><th style="width:30%">用途</th><th>从哪里获取</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>AMAP_WEB_SERVICE_KEY</code></td>
+        <td>后端调 POI 搜索 / 路径规划 / 天气<br><span class="muted">绝不下发到浏览器</span></td>
+        <td>高德控制台 → 应用管理 → 添加 Key → 选「<strong>Web服务</strong>」</td>
+      </tr>
+      <tr>
+        <td><code>AMAP_JS_KEY</code></td>
+        <td>浏览器加载地图用<br><span class="muted">必须出现在前端，靠域名白名单保护</span></td>
+        <td>添加 Key → 选「<strong>Web端(JS API)</strong>」</td>
+      </tr>
+      <tr>
+        <td><code>AMAP_JS_SECURITY_CODE</code></td>
+        <td>与 JS Key 配套的安全密钥<br><span class="muted">2021 年后新建的 JS Key 强制要求</span></td>
+        <td>创建 JS Key 时平台自动生成，两串一起给</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="box warn">
+    <strong>这两种 Key 类型不同，不能混用</strong>
+    填错位置会得到「INVALID_USER_KEY」之类的报错。Web 服务 Key 拿去做地图渲染会失败，
+    JS Key 拿去做后端请求也会失败。
+  </div>
+
+  <pre><code># apps/server/.env 里的样子（值换成你自己的）
+AMAP_WEB_SERVICE_KEY="你的Web服务Key"
+AMAP_JS_KEY="你的JS Key"
+AMAP_JS_SECURITY_CODE="你的安全密钥"</code></pre>
+
+  <h2>三、上线前必做清单</h2>
+
+  <ol class="steps">
+    <li>
+      <strong>给 JS Key 配上线上域名白名单</strong>
+      <span class="tag">最容易漏</span><br>
+      高德控制台 → 找到那个 JS Key → 域名白名单 → 填入你的线上域名（如 <code>travel.example.com</code>）。<br>
+      <span class="muted">不配的话，本地开发正常，一上线地图就白屏并报 INVALID_USER_SCODE。这是最常见的上线翻车点。</span>
+    </li>
+
+    <li>
+      <strong>确认 <code>DEFAULT_MODEL_API_KEY</code> 保持为空</strong>
+      <span class="tag">省钱关键</span><br>
+      当前你的配置已经是空的，<strong>保持原样</strong>。<br>
+      <span class="muted">一旦填了它，所有"没在设置页配 Key"的用户都会消耗你这个 Key 的余额——
+      那就变成你替全世界的用户掏模型钱了。</span>
+    </li>
+
+    <li>
+      <strong>重新生成一套生产用的密钥</strong><br>
+      别跟开发环境共用。两个值：<code>JWT_SECRET</code>（登录凭证签名）和
+      <code>VAULT_MASTER_KEY</code>（加密所有用户的 API Key）。
+      <pre><code>node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"  # JWT_SECRET
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # VAULT_MASTER_KEY（必须 64 位十六进制）</code></pre>
+      <span class="muted">⚠️ <code>VAULT_MASTER_KEY</code> 一旦丢失，库里所有用户的模型 API Key 都再也解不开，无法恢复。</span>
+    </li>
+
+    <li>
+      <strong>数据库从 SQLite 换成 PostgreSQL</strong><br>
+      现在的 <code>file:./prisma/dev.db</code> 是单文件数据库，适合本地开发，
+      多用户并发写入时容易出问题。切换方式是在 <code>prisma.config.ts</code> 里换成
+      <code>postgresql://</code> 连接串。
+    </li>
+
+    <li>
+      <strong>确认 <code>.env</code> 没被提交</strong><br>
+      它已经被 <code>.gitignore</code> 排除，部署时用环境变量或服务器上的文件单独放置，
+      不要图省事塞进仓库。
+    </li>
+  </ol>
+
+  <h2>四、两个需要你提前想清楚的敞口</h2>
+
+  <div class="box warn">
+    <strong>敞口 1：注册接口完全开放</strong>
+    目前任何人都能访问你的网址自助注册账号，注册后就能使用你的高德配额。
+    如果只是给朋友用，建议加个注册邀请码，或干脆关掉注册改为手动开号。
+  </div>
+
+  <div class="box warn">
+    <strong>敞口 2：没有请求频率限制</strong>
+    代码里没有 rate limit。虽然所有 POI / 路径 / 天气查询都走了 TTL 缓存
+    （同一城市、同一酒店短时间内重复查询不会重复消耗配额），
+    但单个账号仍可以反复查询大量不同地点来刷爆你的日配额。
+    建议在高德控制台设置「日配额上限 + 用量告警」作为兜底。
+  </div>
+
+  <h2>五、钱到底花在谁身上</h2>
+  <table>
+    <thead>
+      <tr><th style="width:26%">项目</th><th style="width:20%">谁出钱</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>模型调用费用</td>
+        <td><strong>用户自己</strong></td>
+        <td>因为兜底 Key 为空，每人必须自带 Key（BYOK），烧各自账号的 token</td>
+      </tr>
+      <tr>
+        <td>高德调用配额</td>
+        <td><strong>你</strong></td>
+        <td>共用你的 Key。免费额度内不花钱，超出后按高德规则限流或计费</td>
+      </tr>
+      <tr>
+        <td>服务器与域名</td>
+        <td><strong>你</strong></td>
+        <td>常规部署成本</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="box ok">
+    <strong>结论</strong>
+    只要保持 <code>DEFAULT_MODEL_API_KEY</code> 为空，你就不会替别人付模型钱。
+    唯一的成本敞口是你的高德配额，用「域名白名单 + 控制台配额告警 + 考虑关闭公开注册」三层挡住即可。
+  </div>
+
+  <hr>
+  <p class="muted">
+    文件位置：<code>docs/部署指南.html</code>　|　相关代码：
+    <code>apps/server/src/config.ts</code>（环境变量读取）、
+    <code>apps/server/src/routes/amap.ts</code>（Key 使用与下发）。
+  </p>
+
+</div>
+</body>
+</html>
