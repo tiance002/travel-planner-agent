@@ -220,7 +220,17 @@ npm run smoke
 ```
 
 截图默认输出到系统临时目录的 `travel-planner-smoke/`。脚本会自动注册一个测试账号
-（默认 `smoke_bot`），可用环境变量覆盖：`CHROME_PATH`、`APP_BASE`、`API_BASE`、`SMOKE_USER`、`SMOKE_PASSWORD`。
+（默认 `smoke_bot`）。**测试密码通过环境变量 `SMOKE_PASSWORD` 提供，仓库里不内置**：
+
+```bash
+# bash
+SMOKE_PASSWORD='你的测试密码' npm run smoke
+
+# PowerShell
+$env:SMOKE_PASSWORD='你的测试密码'; npm run smoke
+```
+
+其余可用环境变量：`CHROME_PATH`、`APP_BASE`、`API_BASE`、`SMOKE_USER`。
 
 带 `SMOKE_GENERATE=1` 时会额外跑一遍真实的 AI 生成（真实消耗模型 token 与高德配额），
 完整验证「点击生成 → 轮询进度 → 已生成」这条链路。

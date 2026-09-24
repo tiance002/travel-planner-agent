@@ -7,8 +7,9 @@
 //   1. 前后端已经在跑（根目录执行 npm run dev）
 //   2. 本机装有 Chrome（或用 CHROME_PATH 指定路径）
 //
-// 用法：npm run smoke
-// 可选环境变量：CHROME_PATH / APP_BASE / API_BASE / SMOKE_USER / SMOKE_PASSWORD
+// 用法：SMOKE_PASSWORD='测试密码' npm run smoke
+// 可选环境变量：CHROME_PATH / APP_BASE / API_BASE / SMOKE_USER
+// 必需环境变量：SMOKE_PASSWORD（密码不写进源码，见下方说明）
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -40,9 +41,22 @@ const API_BASE = process.env.API_BASE ?? 'http://127.0.0.1:3001/api'
 const OUT_DIR = process.env.SHOT_DIR ?? path.join(os.tmpdir(), 'travel-planner-smoke')
 const PROFILE_DIR = path.join(OUT_DIR, 'cdp-profile')
 
-// 测试专用账号。脚本会自动注册；已存在则直接登录
+// 测试专用账号。脚本会自动注册；已存在则直接登录。
+//
+// 密码为什么必须由环境变量提供：本仓库是公开的，写死在源码里的密码
+// 等于向所有人公开一个可用的登录凭据。所以这里只保留账号名的默认值，
+// 密码缺失时直接退出并给出提示，绝不内置可用的默认密码。
 const SMOKE_USER = process.env.SMOKE_USER ?? 'smoke_bot'
-const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD ?? 'SmokeTest2026!'
+const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD ?? ''
+
+if (!SMOKE_PASSWORD) {
+  throw new Error(
+    '缺少环境变量 SMOKE_PASSWORD。\n' +
+      '冒烟测试需要一个测试账号，为避免把可用密码写进公开仓库，密码必须由环境变量提供。\n' +
+      "  bash:   SMOKE_PASSWORD='你的测试密码' npm run smoke\n" +
+      "  PowerShell:  $env:SMOKE_PASSWORD='你的测试密码'; npm run smoke",
+  )
+}
 
 // 前端存登录凭证用的 localStorage key，必须与 apps/web/src/auth.ts 保持一致
 const TOKEN_KEY = 'travel_planner_token'
