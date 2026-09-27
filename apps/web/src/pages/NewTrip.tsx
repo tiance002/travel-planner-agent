@@ -18,6 +18,7 @@ import {
   Button,
   Card,
   Col,
+  Collapse,
   DatePicker,
   Descriptions,
   Divider,
@@ -181,6 +182,15 @@ interface ReviewRequest {
   candidates?: ReviewCandidate[]
 }
 
+/**
+ * 行程生成状态。
+ *
+ * partial 是审查报告 A08 新增的一档：存在「连续失败被跳过」的天时，
+ * 整趟不应标记为 ready（那会让用户以为 5 天都排好了），
+ * 而是标记 partial，并把缺失的天数明确告知。
+ */
+type GenStatus = 'draft' | 'generating' | 'ready' | 'partial' | 'failed'
+
 export default function NewTrip() {
   const { message } = App.useApp()
   const { token } = antdTheme.useToken()
@@ -206,11 +216,13 @@ export default function NewTrip() {
 
   // 生成相关状态。真正的排程在服务端后台跑，这里只负责轮询与展示
   const [generating, setGenerating] = useState(false)
-  const [genStatus, setGenStatus] = useState<'draft' | 'generating' | 'ready' | 'failed'>('draft')
+  const [genStatus, setGenStatus] = useState<GenStatus>('draft')
   const [genProgress, setGenProgress] = useState('')
   const [genError, setGenError] = useState('')
   /** 已完成到第几天。服务端按天生成，这个数字让进度看得见 */
   const [genDayIndex, setGenDayIndex] = useState<number | null>(null)
+  /** 生成过程中服务端自动修正过的规则提示（通勤超时换点、天型降档等） */
+  const [genWarnings, setGenWarnings] = useState<string[]>([])
   const pollTimer = useRef<number | null>(null)
 
   // --- 图版专属的两个开关（LangGraph 编排） ---------------------------------
@@ -373,11 +385,14 @@ export default function NewTrip() {
           genError: string | null
           genDayIndex: number | null
           genReview: string | null
+          genWarnings?: string[]
         }
       }>(`/trips/${tripId}`)
 
       const trip = data.trip
-      setGenStatus(trip.status as 'draft' | 'generating' | 'ready' | 'failed')
+      // partial = 部分完成（有跳过的天）。它属于「已结束」而不是「进行中」，
+      // 所以同样要停止轮询、把 generating 关掉（见报告 A08）。
+      setGenStatus(trip.status as GenStatus)
       setGenProgress(trip.genProgress ?? '')
       // 图版交互模式：genReview 是服务端 interrupt 的结构化载荷（JSON 字符串）。
       // kind=confirm 单方案确认/驳回；kind=choose 双方案对比挑选。
@@ -393,6 +408,9 @@ export default function NewTrip() {
       setReviewRequest(request)
       setGenError(trip.genError ?? '')
       setGenDayIndex(trip.genDayIndex ?? null)
+      // 规则修正提示（报告 A09）：这些是「AI 原本排得不合理、已被自动纠正」
+      // 的记录，让用户能判断生成质量，而不是只看到一个「已完成」
+      setGenWarnings(trip.genWarnings ?? [])
 
       if (trip.status === 'generating') {
         pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
@@ -515,8 +533,11 @@ export default function NewTrip() {
   // 逐天生成的进度。服务端把「已完成到第几天」写在 genDayIndex 上
   const totalDays = stepOne?.days ?? 0
   const doneDays = genDayIndex ?? 0
-  // 失败但已经排好了部分天数：这时值得给一个「继续」而不是逼着他从头重来
-  const canContinue = genStatus === 'failed' && doneDays > 0 && doneDays < totalDays
+  // 「继续生成」的适用条件：整趟没跑完（failed 失败，或 partial 有跳过的天），
+  // 且已经排好了部分天数——这时值得给一个「继续」而不是逼着他从头重来。
+  // 报告 A08：partial 状态必须给用户这条出口，否则缺失的天无从补齐。
+  const canContinue =
+    (genStatus === 'failed' || genStatus === 'partial') && doneDays > 0 && doneDays < totalDays
 
   return (
     <div style={{ maxWidth: 1080, margin: '0 auto' }}>
@@ -1085,22 +1106,28 @@ export default function NewTrip() {
             )}
           </Space>
 
-          {(genStatus === 'generating' || doneDays > 0) && (
+          {(genStatus === 'generating' || genStatus === 'partial' || doneDays > 0) && (
             <div data-testid="gen-progress" style={{ marginBottom: 16 }}>
               <Alert
-                type={genStatus === 'generating' ? 'info' : 'warning'}
+                // partial 用 error 而不是 warning：它意味着整趟没跑完，
+                // 用户需要主动决定是「接着排剩下的」还是「重新生成」（报告 A08）
+                type={genStatus === 'generating' ? 'info' : genStatus === 'partial' ? 'error' : 'warning'}
                 showIcon
                 title={
                   genStatus === 'generating'
                     ? reviewRequest
                       ? 'AI 正在等待你的裁决（见上方卡片）'
                       : `AI 正在排程：${genProgress || '准备中'}`
-                    : `已排好 ${doneDays}/${totalDays} 天`
+                    : genStatus === 'partial'
+                      ? genError || `已排好 ${doneDays}/${totalDays} 天，有部分天数未能完成`
+                      : `已排好 ${doneDays}/${totalDays} 天`
                 }
                 description={
                   genStatus === 'generating'
                     ? '正在调用高德接口查询景点、餐厅与真实路线，每排完一天就会立刻存下来。'
-                    : '上面这些天已经保存在行程里了，可以接着把剩下的排完。'
+                    : genStatus === 'partial'
+                      ? '缺失的天没有生成数据。可以点「继续生成」把它们补上，或「从头重新生成」重排整趟。'
+                      : '上面这些天已经保存在行程里了，可以接着把剩下的排完。'
                 }
               />
               <Progress
@@ -1108,6 +1135,32 @@ export default function NewTrip() {
                 size="small"
                 format={() => `${doneDays}/${totalDays} 天`}
                 style={{ marginTop: 8 }}
+                status={genStatus === 'partial' ? 'exception' : undefined}
+              />
+            </div>
+          )}
+
+          {/* 规则修正提示（报告 A09）：AI 原本排得不合理、被自动纠正的地方。
+              折叠展示，不打断主流程，但让用户能主动检查生成质量。 */}
+          {genWarnings.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <Collapse
+                size="small"
+                items={[
+                  {
+                    key: 'warnings',
+                    label: `AI 自动调整了 ${genWarnings.length} 处安排（点击查看）`,
+                    children: (
+                      <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+                        {genWarnings.map((warning, index) => (
+                          <li key={index} style={{ marginBottom: 4 }}>
+                            {warning}
+                          </li>
+                        ))}
+                      </ul>
+                    ),
+                  },
+                ]}
               />
             </div>
           )}

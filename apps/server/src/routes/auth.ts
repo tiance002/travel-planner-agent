@@ -3,10 +3,11 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { Router } from 'express'
+import express, { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rate-limit'
 import { signToken } from '../utils/jwt'
 import { hashPassword, verifyPassword } from '../utils/password'
 
@@ -31,63 +32,75 @@ const loginSchema = z.object({
 })
 
 // 注册
-authRouter.post('/register', async (req, res, next) => {
-  try {
-    const parsed = registerSchema.safeParse(req.body)
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.issues[0]?.message ?? '参数不合法' })
-      return
+// 限流：注册按 IP 计数（此时一定未登录）。公开注册是撞库与批量注册的入口，
+// 15 分钟内 10 次对正常用户绰绰有余，对脚本则是硬门槛（见报告 A04 / 9.3）。
+authRouter.post(
+  '/register',
+  rateLimit({ prefix: 'auth:register', limit: 10, windowMs: 15 * 60 * 1000, message: '注册请求过于频繁' }),
+  async (req, res, next) => {
+    try {
+      const parsed = registerSchema.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message ?? '参数不合法' })
+        return
+      }
+
+      const { username, password } = parsed.data
+
+      const exists = await prisma.user.findUnique({ where: { username } })
+      if (exists) {
+        res.status(409).json({ error: '该用户名已被占用' })
+        return
+      }
+
+      const user = await prisma.user.create({
+        data: { username, passwordHash: await hashPassword(password) },
+      })
+
+      // 注册成功后直接返回登录凭证，用户不需要再登录一次
+      res.status(201).json({
+        token: signToken({ userId: user.id, username: user.username }),
+        user: { id: user.id, username: user.username },
+      })
+    } catch (err) {
+      next(err)
     }
-
-    const { username, password } = parsed.data
-
-    const exists = await prisma.user.findUnique({ where: { username } })
-    if (exists) {
-      res.status(409).json({ error: '该用户名已被占用' })
-      return
-    }
-
-    const user = await prisma.user.create({
-      data: { username, passwordHash: await hashPassword(password) },
-    })
-
-    // 注册成功后直接返回登录凭证，用户不需要再登录一次
-    res.status(201).json({
-      token: signToken({ userId: user.id, username: user.username }),
-      user: { id: user.id, username: user.username },
-    })
-  } catch (err) {
-    next(err)
-  }
-})
+  },
+)
 
 // 登录
-authRouter.post('/login', async (req, res, next) => {
-  try {
-    const parsed = loginSchema.safeParse(req.body)
-    if (!parsed.success) {
-      res.status(400).json({ error: '请输入用户名和密码' })
-      return
+// 限流：登录是撞库的主要入口。按 IP 限 15 分钟 30 次——
+// 既要挡住脚本暴力尝试，又不能误伤「手滑输错几次」的正常用户。
+authRouter.post(
+  '/login',
+  rateLimit({ prefix: 'auth:login', limit: 30, windowMs: 15 * 60 * 1000, message: '登录尝试过于频繁' }),
+  async (req, res, next) => {
+    try {
+      const parsed = loginSchema.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: '请输入用户名和密码' })
+        return
+      }
+
+      const { username, password } = parsed.data
+      const user = await prisma.user.findUnique({ where: { username } })
+
+      // 注意：用户不存在与密码错误返回同一个提示，
+      // 否则攻击者可以靠提示差异逐个试出哪些用户名真实存在。
+      if (!user || !(await verifyPassword(password, user.passwordHash))) {
+        res.status(401).json({ error: '用户名或密码错误' })
+        return
+      }
+
+      res.json({
+        token: signToken({ userId: user.id, username: user.username }),
+        user: { id: user.id, username: user.username },
+      })
+    } catch (err) {
+      next(err)
     }
-
-    const { username, password } = parsed.data
-    const user = await prisma.user.findUnique({ where: { username } })
-
-    // 注意：用户不存在与密码错误返回同一个提示，
-    // 否则攻击者可以靠提示差异逐个试出哪些用户名真实存在。
-    if (!user || !(await verifyPassword(password, user.passwordHash))) {
-      res.status(401).json({ error: '用户名或密码错误' })
-      return
-    }
-
-    res.json({
-      token: signToken({ userId: user.id, username: user.username }),
-      user: { id: user.id, username: user.username },
-    })
-  } catch (err) {
-    next(err)
-  }
-})
+  },
+)
 
 // 查询当前登录用户，用于前端刷新页面后确认登录态是否仍然有效。
 // 顺带返回头像：左侧栏与顶部都要显示，每次都查一次库（单表主键查询，开销可忽略）
@@ -223,12 +236,25 @@ const ALLOWED_IMAGE_TYPES: Record<string, string> = {
 }
 const MAX_AVATAR_BYTES = 300 * 1024
 
+/**
+ * 这条路由专属的请求体上限（见审查报告 A14）。
+ *
+ * 业务限制是 300KB，但 base64 会膨胀约 1/3，再加上 JSON 包装，
+ * 所以给到 512KB 的传输上限：既能让合法的 300KB 图片顺利到达业务校验，
+ * 又不会像全局 1MB 那样把上限放大到业务限制的 3 倍多。
+ *
+ * 注意：路由级 express.json() 必须在全局 express.json() 之前生效才有意义——
+ * 这里用「更小的 limit 覆盖」的方式实现：全局不解析这条路径，由本路由自己解析。
+ * 为此 index.ts 里的全局 json 解析对这个前缀做了跳过（见 express.json 的 verify/type）。
+ */
+const avatarBodyLimit = express.json({ limit: '512kb' })
+
 const avatarUploadSchema = z.object({
   /** dataURL 形如 data:image/png;base64,xxxx */
   data: z.string().min(1, '缺少图片数据'),
 })
 
-authRouter.post('/avatar/upload', requireAuth, async (req, res, next) => {
+authRouter.post('/avatar/upload', avatarBodyLimit, requireAuth, async (req, res, next) => {
   try {
     const parsed = avatarUploadSchema.safeParse(req.body)
     if (!parsed.success) {
@@ -254,10 +280,12 @@ authRouter.post('/avatar/upload', requireAuth, async (req, res, next) => {
       return
     }
 
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+    // 用异步 IO（见审查报告 A29）：写盘不该阻塞事件循环。
+    // 头像请求频率不高，但同步 fs 在大文件或慢盘上会卡住整个进程。
+    await fs.promises.mkdir(UPLOAD_DIR, { recursive: true })
     // 文件名带 userId：一人一份，重复上传直接覆盖旧文件，不会互相影响
     const filename = `avatar-${req.user!.userId}.${ext}`
-    fs.writeFileSync(path.join(UPLOAD_DIR, filename), buffer)
+    await fs.promises.writeFile(path.join(UPLOAD_DIR, filename), buffer)
 
     // 带随机参数防缓存：换头像后浏览器要立刻看到新图
     const url = `/uploads/${filename}?v=${randomUUID().slice(0, 8)}`

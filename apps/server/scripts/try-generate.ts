@@ -14,7 +14,7 @@
 // 注意别站在 apps 目录下敲路径 —— 脚本在 apps/server/scripts 里，不是 apps/scripts。
 
 import { prisma } from '../src/db'
-import { generateTrip } from '../src/services/agent'
+import { generateTripWithGraph } from '../src/services/agent/graph-run'
 import { geocode } from '../src/services/amap'
 
 const username = process.argv[2] ?? '123'
@@ -62,7 +62,10 @@ console.log(`开始生成……（模式：${mode}，每天一次请求）\n`)
 
 const startedAt = Date.now()
 try {
-  await generateTrip(trip.id, { mode })
+  // 走 LangGraph 图版入口（与生产同一条路径）。
+  // 见审查报告 A05：这里原来导入的是已删除的旧手写版 generateTrip，
+  // 脚本早已跑不起来——它同时也是 tsconfig 不覆盖 scripts 才会漏掉的问题（A06）。
+  await generateTripWithGraph(trip.id, { mode })
 } catch (error) {
   console.log(`\n生成失败：${error instanceof Error ? error.message : String(error)}`)
 }

@@ -14,11 +14,13 @@
 // 粒度是「一天」而不是「整趟行程」：生成本身就是一天一次请求，
 // 校验跟着对齐，某一天排坏了能立刻发现，不必等所有天都跑完。
 
+import { poiFromPlannedItem, plannedItemFromPoi } from '../../domain/poi-mapper'
 import { planRoute, straightLineDistance, type Poi } from '../amap'
 import {
   checkRating,
   checkSlotHours,
   isRatingReject,
+  matchesHike,
   maxSpotsForDay,
   NIGHT_KIND_LABEL,
   nightKind,
@@ -556,33 +558,26 @@ function isRestaurant(poi: Poi): boolean {
 }
 
 /** 把 POI 转成待落库的条目 */
+/**
+ * Poi → PlannedItem。
+ *
+ * 见审查报告 5.3：这个转换原本在 scheduler 里手写一份。现在收敛到
+ * domain/poi-mapper 的 plannedItemFromPoi（三处共用同一实现）。
+ *
+ * 但这里必须传一个「带类型信息」的 POI：plannedItemFromPoi 靠
+ * type/typecode 判断是不是餐厅，而登记的 POI 完整保留了高德返回的这两项，
+ * 判定比早先「只看 typecode 前缀」更准。isRestaurant 仍在此处保留为兜底判据。
+ */
 function toPlannedItem(
   poi: Poi,
   note: string,
   slot: string,
   orderIndex: number,
 ): PlannedItem {
-  return {
-    poiId: poi.poiId,
-    name: poi.name,
-    lng: poi.lng,
-    lat: poi.lat,
-    address: poi.address,
-    tel: poi.tel,
-    rating: poi.rating === null ? null : String(poi.rating),
-    cost: poi.cost === null ? null : String(poi.cost),
-    tag: poi.tag || poi.keytag,
-    // 高德不总是返回营业时间，缺失时前端要显示「营业时间未知」而不是空白
-    openTimeText: poi.openTimeToday,
-    itemType: isRestaurant(poi) ? 'restaurant' : 'spot',
-    slot,
-    note,
-    orderIndex,
-    typecode: poi.typecode,
-    commuteMinutes: null,
-    // 照片最多存 3 张：详情页首屏够用，也避免 JSON 字段无限膨胀
-    photos: poi.photos.slice(0, 3),
-  }
+  const item = plannedItemFromPoi(poi, note, slot, orderIndex)
+  // 高德的 type 字段不稳定（有时是「餐饮服务」，有时直接是「中餐厅」），
+  // 用 isRestaurant 再兜一次，避免餐厅被当成景点排进时段
+  return { ...item, itemType: isRestaurant(poi) ? 'restaurant' : item.itemType }
 }
 
 /**
@@ -1200,18 +1195,34 @@ export async function optimizeCommute(
  * 全填成空值，导致换点逻辑根本拿不到评分和类型——只能按直线距离瞎挑，
  * 挑出 3 分小店的概率不低。现在改成优先查表，查不到才退化成最小形状。
  */
+/**
+ * 把 PlannedItem 还原成 POI 形状。
+ *
+ * 见审查报告 5.3：原本这里是第三份手写的构造。现在统一走
+ * domain/poi-mapper——但它多一层「优先从登记表取原对象」的逻辑，
+ * 这是 scheduler 特有的优化：登记表里存的是高德返回的完整 POI，
+ * 评分、类型、分类编码都在，比从条目字段反推更准确。
+ *
+ * 早先的实现把 rating、type、typecode 全填成空值，导致换点逻辑
+ * 拿不到评分和类型，只能按直线距离瞎挑——这条兜底路径正是当时的补救。
+ */
 function asPoi(item: PlannedItem, registry?: Map<string, Poi>): Poi {
   const fromRegistry = registry?.get(item.poiId)
   if (fromRegistry) return fromRegistry
 
+  const mapped = poiFromPlannedItem(item)
+  if (mapped) return mapped
+
+  // 条目缺坐标（理论上不该发生）时仍返回一个可用的壳，避免调用方拿到 null
+  // 后整条通勤体检链路中断。坐标填 0 是刻意的：后续 planRoute 会失败并返回 null，
+  // 通勤数据按「未知」处理，而不是抛错。
   return {
     poiId: item.poiId,
     name: item.name,
     lng: item.lng,
     lat: item.lat,
     address: item.address,
-    // 用 typecode 反推类型：05 开头是餐饮。这条兜底路径拿不到完整信息，
-    // 但至少比原来全填空值强——至少 isRestaurant 还能判对
+    // 用 typecode 反推类型：05 开头是餐饮
     type: item.typecode.startsWith('05') ? '餐饮服务' : '',
     typecode: item.typecode,
     cityName: '',
@@ -1301,8 +1312,7 @@ function pickReplacement(
   return best
 }
 
-/** 兜底用的高强度地点判断。避免 scheduler 直接依赖 spot-rules 的私有表 */
+/** 兜底用的高强度地点判断。统一依赖 spot-rules.matchesHike——唯一的规则事实来源 */
 function matchesHikeKeyword(poi: Poi): boolean {
-  const text = `${poi.name} ${poi.tag} ${poi.keytag} ${poi.type}`
-  return /登山|徒步|索道|爬山|栈道|山顶|峡谷/.test(text)
+  return matchesHike(poi)
 }

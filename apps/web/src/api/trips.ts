@@ -80,6 +80,8 @@ export interface TripDetailData {
   genProgress: string | null
   genDayIndex: number | null
   genError: string | null
+  /** 生成过程中自动修正的规则提示（通勤超时换点、天型降档等），后端已去重 */
+  genWarnings?: string[]
   tripDays: TripDayData[]
 }
 

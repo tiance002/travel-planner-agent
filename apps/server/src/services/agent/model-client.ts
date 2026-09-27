@@ -9,6 +9,7 @@
 // 这一层的职责，就是把这个「申请 → 执行 → 回填」的来回跑完，直到模型给出最终答案。
 
 import { describeHttpError, type ModelCredentials } from '../llm'
+import { assertSafeModelBaseUrlOrThrow } from '../../utils/ssrf'
 
 /** 模型要求调用某个工具时返回的结构（OpenAI 兼容格式） */
 export interface ToolCall {
@@ -98,6 +99,12 @@ function sleep(ms: number) {
 async function requestOnce(request: ChatRequest, body: Record<string, unknown>, timeoutMs: number): Promise<string> {
   const baseUrl = request.credentials.baseUrl.replace(/\/+$/, '')
 
+  // SSRF 二次防线（见审查报告 A01 / 9.2）：真正发起网络请求前再校验一次地址。
+  // 保存接口已经拦过一次，但配置可能是历史遗留数据（写入时还没有这道校验），
+  // 所以「发起请求」这个真正危险的动作必须自己再确认一遍。
+  // https 强制只针对生产环境，开发期允许用户用本地 http 中转服务联调。
+  await assertSafeModelBaseUrlOrThrow(baseUrl)
+
   let response: Response
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
@@ -108,6 +115,9 @@ async function requestOnce(request: ChatRequest, body: Record<string, unknown>, 
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
+      // 禁止自动跟随重定向：否则可以先给一个公网地址、再 302 到内网，
+      // 绕过上面基于目标地址的校验（报告 9.2 第 3 条）
+      redirect: 'manual',
     })
   } catch (error) {
     const isTimeout = error instanceof Error && error.name === 'TimeoutError'

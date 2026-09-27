@@ -9,6 +9,7 @@
 
 import { config } from '../config'
 import { prisma } from '../db'
+import { assertSafeModelBaseUrlOrThrow, UnsafeUrlError } from '../utils/ssrf'
 import { decryptSecret } from '../utils/vault'
 
 export interface ModelCredentials {
@@ -46,6 +47,17 @@ export async function testCredentials(credentials: ModelCredentials): Promise<Te
 
   if (!baseUrl || !credentials.modelName.trim() || !credentials.apiKey.trim()) {
     return { ok: false, message: '接口地址、模型名称、API Key 三项都不能为空', latencyMs: 0 }
+  }
+
+  // SSRF 防线（见审查报告 A01 / 9.2）：发起外呼之前先确认目标地址安全
+  try {
+    await assertSafeModelBaseUrlOrThrow(baseUrl)
+  } catch (error) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - startedAt,
+      message: error instanceof UnsafeUrlError ? error.message : '接口地址不安全，已被拒绝',
+    }
   }
 
   let response: Response

@@ -30,6 +30,19 @@ function check(name: string, actual: unknown, expected: unknown) {
   }
 }
 
+/**
+ * 读取图结果里的 `__interrupt__` 负载。
+ *
+ * LangGraph 在命中 `interrupt()` 时会把中断信息挂到结果对象的 `__interrupt__`
+ * 字段上，但它**不在图的 StateSchema 里**，所以无法从 `invoke()` 的返回类型上推断出来。
+ * 这里用一个带类型断言的小助手把它取出来，避免在断言里到处写 `as any`——
+ * 既保留了严格类型检查，又只在这一处对 LangGraph 的返回结构做收敛。
+ */
+function interruptPayloads(result: unknown): Array<{ value?: unknown }> {
+  const raw = (result as { __interrupt__?: unknown[] }).__interrupt__
+  return Array.isArray(raw) ? (raw as Array<{ value?: unknown }>) : []
+}
+
 // ---------------------------------------------------------------------------
 // 测试 1：条件边 + 状态累积（复刻 planDay 的循环结构）
 // ---------------------------------------------------------------------------
@@ -83,7 +96,8 @@ const cpGraph = new StateGraph(CpState)
 
 const cfg = { configurable: { thread_id: 'cp-test' } }
 const r1 = await cpGraph.invoke({ step: 'start', seen: [] }, cfg)
-check('中断时返回 __interrupt__ 负载', Array.isArray(r1.__interrupt__) && r1.__interrupt__.length === 1, true)
+const r1Interrupts = interruptPayloads(r1)
+check('中断时返回 __interrupt__ 负载', r1Interrupts.length === 1, true)
 
 const r2 = await cpGraph.invoke(new Command({ resume: 'approved' }), cfg)
 check('恢复后 interrupt 的返回值回填到节点', r2.seen.includes('a:approved'), true)
@@ -149,7 +163,7 @@ function buildPersistGraph() {
 // 第一次：中断（模拟进程在生成中途崩了）
 const persistCfg = { configurable: { thread_id: 'persist-test' } }
 const p1 = await buildPersistGraph().invoke({ step: 'start', seen: [] }, persistCfg)
-check('SQLite 中断时返回 __interrupt__', Array.isArray(p1.__interrupt__) && p1.__interrupt__.length === 1, true)
+check('SQLite 中断时返回 __interrupt__', interruptPayloads(p1).length === 1, true)
 
 // 第二次：全新图实例 + 全新 checkpointer，用同一 thread_id 恢复（模拟进程重启）
 const p2 = await buildPersistGraph().invoke(new Command({ resume: 'ok' }), persistCfg)
@@ -187,7 +201,7 @@ const reviewGraph = new StateGraph(ReviewState)
 
 const reviewCfg = { configurable: { thread_id: 'review-test' } }
 const rv1 = await reviewGraph.invoke({ dayIndex: 2, summary: '' }, reviewCfg)
-const payload = (rv1.__interrupt__?.[0] as { value?: { dayIndex?: number; summary?: string } })?.value
+const payload = interruptPayloads(rv1)[0]?.value as { dayIndex?: number; summary?: string } | undefined
 check('interrupt 负载带 dayIndex', payload?.dayIndex, 2)
 check('interrupt 负载带摘要', payload?.summary, '西湖一日游：断桥 → 苏堤 → 雷峰塔')
 

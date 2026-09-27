@@ -10,7 +10,9 @@ import { z } from 'zod'
 import { config } from '../config'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rate-limit'
 import { getCredentialsForUser, testCredentials } from '../services/llm'
+import { assertSafeModelBaseUrl } from '../utils/ssrf'
 import { decryptSecret, encryptSecret, maskSecret } from '../utils/vault'
 
 export const settingsRouter = Router()
@@ -38,6 +40,21 @@ const testSchema = z.object({
   modelName: z.string().trim().max(100).default(''),
   apiKey: z.string().trim().max(500).optional(),
 })
+
+/**
+ * SSRF 校验的共用入口（见审查报告 A01 / 9.2）。
+ *
+ * 保存与测试连接两条路径都要过这道门：否则攻击者可以只调「测试连接」，
+ * 让服务器去探测内网地址——即使配置没被保存，探测也已经发生了。
+ * 返回 null 表示通过；返回字符串表示不通过，内容是给用户看的原因。
+ */
+async function checkBaseUrl(baseUrl: string): Promise<string | null> {
+  const value = baseUrl.trim()
+  // 允许留空：用户可能只用环境变量的全局默认，或只想清空配置
+  if (!value) return null
+  const result = await assertSafeModelBaseUrl(value)
+  return result.ok ? null : (result.reason ?? '接口地址不安全')
+}
 
 // 把数据库记录整理成前端需要的形状，绝不包含明文
 async function buildStatus(userId: string) {
@@ -97,6 +114,13 @@ settingsRouter.put('/model', async (req, res, next) => {
     const userId = req.user!.userId
     const { provider, baseUrl, modelName, apiKey } = parsed.data
 
+    // SSRF 防护：保存前先校验地址，防止把内网地址写进配置后由后台任务去访问
+    const unsafe = await checkBaseUrl(baseUrl)
+    if (unsafe) {
+      res.status(400).json({ error: unsafe })
+      return
+    }
+
     // 先取出旧记录，用于「不传 apiKey 时保留原值」以及「清除时不误删配置」
     const existing = await prisma.userSetting.findUnique({ where: { userId } })
 
@@ -148,33 +172,47 @@ settingsRouter.delete('/model', async (req, res, next) => {
 // 测试连接。
 // 允许直接带草稿参数来测，用户不必「先保存再测」；
 // 没带 Key 时会依次尝试已保存的 Key 和环境变量里的全局默认。
-settingsRouter.post('/model/test', async (req, res, next) => {
-  try {
-    const parsed = testSchema.safeParse(req.body)
-    if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.issues[0]?.message ?? '参数不合法' })
-      return
+// 限流：这条接口会让服务器立刻外呼一次，可能被当作通用网络代理或成本攻击入口
+// （见报告 A04）。按用户限 1 分钟 10 次，正常调试绝不会触顶。
+settingsRouter.post(
+  '/model/test',
+  rateLimit({ prefix: 'settings:model-test', limit: 10, windowMs: 60 * 1000, message: '测试连接过于频繁' }),
+  async (req, res, next) => {
+    try {
+      const parsed = testSchema.safeParse(req.body)
+      if (!parsed.success) {
+        res.status(400).json({ error: parsed.error.issues[0]?.message ?? '参数不合法' })
+        return
+      }
+
+      const userId = req.user!.userId
+      const fallback = await getCredentialsForUser(userId)
+
+      const credentials = {
+        provider: parsed.data.modelName ? parsed.data.modelName : (fallback?.provider ?? ''),
+        baseUrl: parsed.data.baseUrl || fallback?.baseUrl || '',
+        modelName: parsed.data.modelName || fallback?.modelName || '',
+        apiKey: parsed.data.apiKey || fallback?.apiKey || '',
+      }
+
+      // 测试连接同样要过 SSRF 校验：这条路径会让服务器立刻发起一次外呼，
+      // 危害与保存后再生成完全一样
+      const unsafe = await checkBaseUrl(credentials.baseUrl)
+      if (unsafe) {
+        res.status(400).json({ error: unsafe })
+        return
+      }
+
+      if (!credentials.apiKey) {
+        res.status(400).json({
+          error: '请先填写 API Key，或先保存一份可用的配置',
+        })
+        return
+      }
+
+      res.json(await testCredentials(credentials))
+    } catch (err) {
+      next(err)
     }
-
-    const userId = req.user!.userId
-    const fallback = await getCredentialsForUser(userId)
-
-    const credentials = {
-      provider: parsed.data.modelName ? parsed.data.modelName : (fallback?.provider ?? ''),
-      baseUrl: parsed.data.baseUrl || fallback?.baseUrl || '',
-      modelName: parsed.data.modelName || fallback?.modelName || '',
-      apiKey: parsed.data.apiKey || fallback?.apiKey || '',
-    }
-
-    if (!credentials.apiKey) {
-      res.status(400).json({
-        error: '请先填写 API Key，或先保存一份可用的配置',
-      })
-      return
-    }
-
-    res.json(await testCredentials(credentials))
-  } catch (err) {
-    next(err)
-  }
-})
+  },
+)

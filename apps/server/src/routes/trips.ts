@@ -4,32 +4,31 @@
 // 所有查询都必须带 userId 条件，这是多用户系统里最基本也最容易漏的隔离要求。
 
 import { Router } from 'express'
+import type { Request } from 'express'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { concurrencyGuard } from '../middleware/rate-limit'
+import { poiFromStay, poiFromTripItem } from '../domain/poi-mapper'
 import { generateTripWithGraph, resumeTripReview } from '../services/agent/graph-run'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
-import { searchPoiById, type Poi } from '../services/amap'
+import { searchPoiById } from '../services/amap'
+import { parseJsonArray, parseJsonObject } from '../utils/json'
 
 export const tripsRouter = Router()
 
 // 整个行程模块都要求登录，统一挂上鉴权中间件
 tripsRouter.use(requireAuth)
 
-/** 把数据库里的 JSON 字符串字段安全地还原成字符串数组 */
-function parseJsonArray(value: string): string[] {
-  try {
-    const parsed = JSON.parse(value)
-    return Array.isArray(parsed) ? parsed.map(String) : []
-  } catch {
-    return []
-  }
-}
-
 /** 还原行程条目里的照片列表 */
 function parsePhotos(value: string | null): string[] {
-  return value ? parseJsonArray(value) : []
+  return parseJsonArray(value)
+}
+
+/** 还原某一天的天气数据。脏数据（不是对象）按「未知」处理，而不是抛错整页 500 */
+function parseWeather(value: string | null): unknown {
+  return parseJsonObject(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,9 +144,11 @@ tripsRouter.get('/:id', async (req, res, next) => {
         ...trip,
         preferences: parseJsonArray(trip.preferences),
         extraNeeds: parseJsonArray(trip.extraNeeds),
+        // 生成过程中的规则修正提示（报告 A09）。非生成的 trip 该字段为 null，前端按空处理
+        genWarnings: trip.genWarnings ? parseJsonArray(trip.genWarnings) : [],
         tripDays: trip.tripDays.map((day) => ({
           ...day,
-          weather: day.weather ? JSON.parse(day.weather) : null,
+          weather: parseWeather(day.weather),
           items: day.items.map((item) => ({
             ...item,
             photos: parsePhotos(item.photos),
@@ -229,65 +230,141 @@ const generateSchema = z.object({
   parallel: z.boolean().default(false),
 })
 
+/**
+ * 原子抢锁：把 Trip 从「空闲」推进到「generating」。
+ *
+ * 见审查报告 A02。原来的写法是「先 findFirst 读状态 → 判断 → 再 update」，
+ * 两个并发请求会在第一次读时都看到可生成状态，于是都往下走、
+ * 各自启动一轮生成——同一个 Trip 跑两张图，落库互相覆盖、模型额度双倍消耗。
+ *
+ * 这里改用**带条件的单条 updateMany**：把状态判断直接写进 WHERE，
+ * 由数据库保证「读」与「写」是同一个原子动作。返回是否抢到。
+ *
+ * 三类可抢的情形：
+ *   - 不是 generating（draft/failed/ready/partial 都允许重新生成）；
+ *   - generating 但已超过 STALE_GENERATING_MS（上次进程重启留下的僵尸任务）；
+ *   - 状态恰好等于我们传入的期望值（review-confirm 场景）。
+ * 除「正在生成且未过期」外，其余都放行——这与原逻辑的语义完全一致。
+ */
+async function acquireGenerationLock(
+  tripId: string,
+  data: { genProgress: string; genError: null; genReview: null },
+): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - STALE_GENERATING_MS)
+  const result = await prisma.trip.updateMany({
+    where: {
+      id: tripId,
+      OR: [
+        { status: { not: 'generating' } },
+        { status: 'generating', updatedAt: { lt: staleBefore } },
+      ],
+    },
+    // 新一轮生成清空上一轮的失败原因与提示，避免旧提示串到新结果里
+    data: { status: 'generating', genWarnings: null, ...data },
+  })
+  return result.count > 0
+}
+
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
-tripsRouter.post('/:id/generate', async (req, res, next) => {
-  try {
-    const parsed = generateSchema.safeParse(req.body ?? {})
-    if (!parsed.success) {
-      res.status(400).json({ error: '参数不合法' })
-      return
-    }
-    const mode = parsed.data.mode
+tripsRouter.post(
+  '/:id/generate',
+  // 并发背压（见报告 A04 / 9.3）：同一用户同时只允许跑 1 个生成任务。
+  // 与下面的原子抢锁互补——抢锁管「同一个 Trip 不会跑两遍」，
+  // 这里管「同一个用户不会同时开好几张图」。
+  concurrencyGuard({
+    prefix: 'generate',
+    max: 1,
+    message: '你还有一个行程正在生成中，请等它完成后再试',
+  }),
+  // 显式标注 req 的 params 类型：这条路由挂了并发背压中间件（两个 handler），
+  // Express 5 的变参重载在这种情况下无法从路径字符串推断出 `:id`，
+  // 会让 req.params.id 退化成 `string | string[]`。这里手动收窄回 `string`。
+  async (req: Request<{ id: string }>, res, next) => {
+    try {
+      const parsed = generateSchema.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json({ error: '参数不合法' })
+        return
+      }
+      const mode = parsed.data.mode
 
-    const trip = await prisma.trip.findFirst({
-      where: { id: req.params.id, userId: req.user!.userId },
-      select: { id: true, status: true, updatedAt: true },
-    })
-    if (!trip) {
-      res.status(404).json({ error: '行程不存在' })
-      return
-    }
+      const trip = await prisma.trip.findFirst({
+        where: { id: req.params.id, userId: req.user!.userId },
+        select: { id: true, status: true, updatedAt: true },
+      })
+      if (!trip) {
+        res.status(404).json({ error: '行程不存在' })
+        return
+      }
 
-    if (
-      trip.status === 'generating' &&
-      Date.now() - trip.updatedAt.getTime() < STALE_GENERATING_MS
-    ) {
-      res.status(409).json({ error: '这个行程正在生成中，请稍候' })
-      return
-    }
-
-    await prisma.trip.update({
-      where: { id: trip.id },
-      data: {
-        status: 'generating',
+      // 原子抢锁（见报告 A02）：状态判断与更新合并成一条带条件的 updateMany，
+      // 并发点击时只有一个请求能抢到，另一个会拿到 count = 0。
+      // 这与原来的「先读后判再写」语义相同，但没有竞态窗口。
+      const acquired = await acquireGenerationLock(trip.id, {
         genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
         genError: null,
         genReview: null,
-      },
-    })
+      })
 
-    // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
-    // 失败时把原因写进 genError，前端就能直接展示给用户看。
-    //
-    // 编排只有 LangGraph 图版一条路径了（手写版 index.ts 已删，能力被完全覆盖：
-    // 节点级断点、逐天确认/驳回、并行双方案、失败重试都是图版专属）。
-    const parallelCandidates = parsed.data.parallel ? 2 : 1
-    void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
-      const message = error instanceof Error ? error.message : '生成失败'
-      console.error(`[生成 ${trip.id}] 失败：${message}`)
-      await prisma.trip
-        .update({
-          where: { id: trip.id },
-          data: { status: 'failed', genProgress: null, genError: message, genReview: null },
-        })
-        .catch(() => undefined)
-    })
+      if (!acquired) {
+        // 没抢到 = 已经有另一个请求把它推进了 generating 且未过期
+        res.status(409).json({ error: '这个行程正在生成中，请稍候' })
+        return
+      }
 
-    res.status(202).json({ ok: true, status: 'generating', mode })
-  } catch (err) {
-    next(err)
-  }
-})
+      // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
+      // 失败时把原因写进 genError，前端就能直接展示给用户看。
+      //
+      // 编排只有 LangGraph 图版一条路径了（手写版 index.ts 已删，能力被完全覆盖：
+      // 节点级断点、逐天确认/驳回、并行双方案、失败重试都是图版专属）。
+      const parallelCandidates = parsed.data.parallel ? 2 : 1
+      void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
+        const message = error instanceof Error ? error.message : '生成失败'
+        console.error(`[生成 ${trip.id}] 失败：${message}`)
+        await prisma.trip
+          .update({
+            where: { id: trip.id },
+            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
+          })
+          .catch(() => undefined)
+      })
+
+      res.status(202).json({ ok: true, status: 'generating', mode })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+/**
+ * 逐天裁决请求体（见审查报告 A03 / 3.1）。
+ *
+ * 用 discriminatedUnion 而不是「一个对象 + 可选字段」，理由有两个：
+ *   1. 语义上这是三种互斥的裁决，用联合类型让「choose 必须带 choice」
+ *      成为类型层面的事实，而不是运行时要记得检查的约定；
+ *   2. 原来的实现把 safeParse 失败**静默降级成 approve**——参数写错
+ *      （比如 choice 传了 'C'、decision 拼错）反而会直接批准方案，
+ *      这是最危险的一种「报错方式」：用户以为在驳回，系统却替他确认了。
+ *      现在校验失败一律 400，绝不替用户做决定。
+ */
+const reviewConfirmSchema = z.discriminatedUnion('decision', [
+  z.object({
+    decision: z.literal('approve'),
+    parallel: z.boolean().default(false),
+  }),
+  z.object({
+    decision: z.literal('choose'),
+    // choose 必须明确指定采用哪个方案，缺了就不是一个合法的裁决
+    choice: z.enum(['A', 'B']),
+    parallel: z.boolean().default(false),
+  }),
+  z.object({
+    decision: z.literal('reject'),
+    // 驳回可以不带意见（用默认文案让模型换一批地点），但带了必须长度合规
+    feedback: z.string().trim().max(500).optional(),
+    parallel: z.boolean().default(false),
+  }),
+])
 
 // 逐天人工确认（V3，仅图版 review 模式）：用户在「待确认」后点了「确认采用」，
 // 用 Command(resume) 让图从 interrupt 处继续排下一天。
@@ -301,6 +378,17 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
       res.status(404).json({ error: '行程不存在' })
       return
     }
+
+    // 参数校验必须在状态校验之前：这是「非法请求不得推进业务流程」的第一道门
+    const parsedConfirm = reviewConfirmSchema.safeParse(req.body ?? {})
+    if (!parsedConfirm.success) {
+      res.status(400).json({
+        error: parsedConfirm.error.issues[0]?.message ?? '裁决参数不合法，请重新选择',
+      })
+      return
+    }
+    const confirmBody = parsedConfirm.data
+
     if (trip.status !== 'generating') {
       res.status(409).json({ error: '行程当前不在生成中，无需确认' })
       return
@@ -309,22 +397,11 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
     // 与 generate 一样，后台恢复，接口立刻返回。
     // answer 携带用户的裁决：approve（确认采用）/ choose（选 A/B）/ reject（驳回，可附意见）。
     // parallel 由前端一并传回：确认后继续排的后续天，保持同样的并行设置。
-    const parsedConfirm = z
-      .object({
-        decision: z.enum(['approve', 'choose', 'reject']).default('approve'),
-        choice: z.enum(['A', 'B']).optional(),
-        feedback: z.string().max(500).optional(),
-        parallel: z.boolean().default(false),
-      })
-      .safeParse(req.body ?? {})
-    const confirmBody = parsedConfirm.success
-      ? parsedConfirm.data
-      : { decision: 'approve' as const, choice: undefined, feedback: undefined, parallel: false }
     void resumeTripReview(trip.id, {
       answer: {
         decision: confirmBody.decision,
-        choice: confirmBody.choice,
-        feedback: confirmBody.feedback,
+        choice: confirmBody.decision === 'choose' ? confirmBody.choice : undefined,
+        feedback: confirmBody.decision === 'reject' ? confirmBody.feedback : undefined,
       },
       parallelCandidates: confirmBody.parallel ? 2 : 1,
     }).catch(async (error: unknown) => {
@@ -338,7 +415,7 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
         .catch(() => undefined)
     })
 
-    res.status(202).json({ ok: true, status: 'reviewing' })
+    res.status(202).json({ ok: true, status: 'reviewing', decision: confirmBody.decision })
   } catch (err) {
     next(err)
   }
@@ -424,45 +501,6 @@ async function loadItemWithDay(tripId: string, itemId: string, userId: string) {
   return item
 }
 
-/** 把数据库里的条目还原成 POI 形状，供距离与路径计算使用 */
-function toPoiShape(item: {
-  poiId: string | null
-  name: string
-  lng: number | null
-  lat: number | null
-  address: string | null
-  tel: string | null
-  rating: string | null
-  cost: string | null
-  tag: string | null
-  typecode: string | null
-  openTimeText: string | null
-  photos: string | null
-}): Poi | null {
-  if (!item.poiId || item.lng === null || item.lat === null) return null
-  return {
-    poiId: item.poiId,
-    name: item.name,
-    lng: item.lng,
-    lat: item.lat,
-    address: item.address ?? '',
-    type: '',
-    typecode: item.typecode ?? '',
-    cityName: '',
-    district: '',
-    adcode: '',
-    rating: item.rating === null ? null : Number(item.rating),
-    cost: item.cost === null ? null : Number(item.cost),
-    tag: item.tag ?? '',
-    keytag: '',
-    openTimeToday: item.openTimeText ?? '',
-    openTimeWeek: '',
-    tel: item.tel ?? '',
-    photos: [],
-    distance: null,
-  }
-}
-
 // 查询某个条目的替换候选。返回的是列表而不是单个结果，由用户自己挑
 tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) => {
   try {
@@ -472,7 +510,8 @@ tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) =>
       return
     }
 
-    const target = toPoiShape(item)
+    // POI 还原统一走 domain/poi-mapper（报告 5.3），不再在路由里手写一份
+    const target = poiFromTripItem(item)
     if (!target) {
       res.status(400).json({ error: '这个条目缺少坐标信息，无法替换' })
       return
@@ -505,35 +544,7 @@ tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) =>
     })
 
     // 住宿锚点还原成 POI 形状，只为了喂给通勤计算，所以除坐标外的字段可以留空
-    const stayPoi: Poi | null =
-      trip?.stayResolved &&
-      trip.stayPoiId &&
-      trip.stayLng !== null &&
-      trip.stayLat !== null &&
-      trip.stayLng !== undefined &&
-      trip.stayLat !== undefined
-        ? {
-            poiId: trip.stayPoiId,
-            name: trip.stayName ?? '住宿',
-            lng: trip.stayLng,
-            lat: trip.stayLat,
-            address: '',
-            type: '住宿服务',
-            typecode: '100000',
-            cityName: '',
-            district: '',
-            adcode: '',
-            rating: null,
-            cost: null,
-            tag: '',
-            keytag: '',
-            openTimeToday: '',
-            openTimeWeek: '',
-            tel: '',
-            photos: [],
-            distance: null,
-          }
-        : null
+    const stayPoi = trip ? poiFromStay(trip) : null
 
     const usedRows = await prisma.tripItem.findMany({
       where: { tripDay: { tripId: req.params.tripId } },
@@ -555,8 +566,8 @@ tripsRouter.get('/:tripId/items/:itemId/alternatives', async (req, res, next) =>
 
     const candidates = await findAlternatives({
       target,
-      previous: prevItem ? toPoiShape(prevItem) : stayPoi,
-      next: nextItem ? toPoiShape(nextItem) : stayPoi,
+      previous: prevItem ? poiFromTripItem(prevItem) : stayPoi,
+      next: nextItem ? poiFromTripItem(nextItem) : stayPoi,
       slot: item.slot,
       usedPoiIds,
       ban: parseDayTypeBan(trip?.extraNeeds ? parseJsonArray(trip.extraNeeds) : []),

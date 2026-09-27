@@ -97,15 +97,19 @@ model Trip {
   stayLng      Float?
   stayLat      Float?
 
-  /// draft 草稿 / generating 生成中 / ready 完成 / failed 失败
+  /// draft 草稿 / generating 生成中 / ready 完成 / partial 部分完成（有跳过的天）/ failed 失败
   status String @default("draft")
 
   /// 生成进度文案，生成过程中实时更新，前端轮询时展示给用户看
   genProgress String?
   /// 逐天生成时「已完成到第几天」。null 表示一天都还没排完
   genDayIndex Int?
-  /// 生成失败的原因。status 为 failed 时才有值
+  /// 生成失败的原因。status 为 failed / partial 时才有值
   genError String?
+  /// 生成过程中累积的规则修正提示（JSON 数组字符串）。
+  /// 来源是 scheduler 的通勤体检与天型校验——这些「AI 排得不合理、已被自动修正」
+  /// 的信息必须落库，否则用户看不到，就无从判断生成质量（审查报告 A09）。
+  genWarnings String?
   /// 图版交互模式的待确认载荷（JSON 字符串）：{kind, dayIndex, summary?, candidates?}。
   /// 非 null 表示图暂停在 interrupt 上等用户裁决；裁决/失败/完成时清空
   genReview String?

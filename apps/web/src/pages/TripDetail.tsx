@@ -50,6 +50,7 @@ import {
 } from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
 import { NotebookRings, StickyNote, usePaperTheme } from '../components/paper'
+import { useGenerationPolling } from '../hooks/useGenerationPolling'
 
 /**
  * 便利贴上的小标。
@@ -236,6 +237,12 @@ export default function TripDetail() {
   const { token } = antdTheme.useToken()
 
   const [trip, setTrip] = useState<TripDetailData | null>(null)
+
+  // 轮询判定需要读到「最新的」生成状态，但又不该把它写进 effect 依赖
+  // （那正是原来轮询停摆的原因）。用 ref 桥接：每次 render 同步一次，
+  // 轮询循环随时读到的都是最新值，而循环本身不被状态变化打断。
+  const tripRef = useRef<TripDetailData | null>(null)
+  tripRef.current = trip
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
@@ -309,25 +316,32 @@ export default function TripDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  // 生成中的行程持续轮询：详情接口本身就带进度字段，直接复用它
-  const pollRef = useRef<number | null>(null)
-  useEffect(() => {
-    if (trip?.status !== 'generating') return
-    pollRef.current = window.setTimeout(async () => {
-      const data = await loadTrip()
-      if (data?.status === 'ready') message.success('行程生成完成')
-    }, 2500)
-    return () => {
-      if (pollRef.current !== null) window.clearTimeout(pollRef.current)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trip?.status, trip?.genDayIndex])
-
-  useEffect(() => {
-    return () => {
-      if (pollRef.current !== null) window.clearTimeout(pollRef.current)
-    }
-  }, [])
+  // 生成中的行程持续轮询（见审查报告 A13 / 3.2）。
+  //
+  // 修复点：原实现用 `useEffect(() => setTimeout(..., 2500), [trip.status, trip.genDayIndex])`，
+  // 一旦某次拉回来的状态没有变化（status 仍是 generating、genDayIndex 还是 null），
+  // 依赖数组不变 → effect 不重跑 → 不会设置下一个定时器 → 轮询彻底停摆。
+  //
+  // 现在交给 useGenerationPolling：由「上一次请求结束」驱动「下一次请求」，
+  // 只要还在生成中就永不间断。依赖只有 tripId，不受状态更新时间点的影响。
+  useGenerationPolling<TripDetailData>({
+    tripId: id,
+    isGenerating: () => tripRef.current?.status === 'generating',
+    fetch: loadTrip,
+    getStatus: (data) => data.status,
+    intervalMs: 2500,
+    onStatusChange: (status, data) => {
+      // 只在「生成结束」的那一次给提示：ready 是完全成功，
+      // partial 是部分成功（有跳过的天），两者对用户的含义不同（报告 A08）。
+      if (status === 'ready') {
+        message.success('行程生成完成')
+      } else if (status === 'partial') {
+        message.warning(data.genError ?? '行程已生成，但有部分天数未能完成')
+      } else if (status === 'failed') {
+        message.error(data.genError ?? '行程生成失败')
+      }
+    },
+  })
 
   // 视口尺寸变化时重算地图高度：右列锁定布局依赖它，不能只在挂载时算一次
   useEffect(() => {
@@ -719,6 +733,9 @@ export default function TripDetail() {
               </Typography.Title>
               {trip.status === 'ready' && <Tag color="success">已完成</Tag>}
               {trip.status === 'generating' && <Tag color="processing">生成中</Tag>}
+              {/* partial：整趟没排完（有跳过的天）。用 warning 而不是 error，
+                  因为大部分天是好的，用户只需补齐缺失的部分（报告 A08） */}
+              {trip.status === 'partial' && <Tag color="warning">部分完成</Tag>}
               {trip.status === 'failed' && <Tag color="error">生成失败</Tag>}
               {trip.status === 'draft' && <Tag>草稿</Tag>}
             </Space>
@@ -751,6 +768,36 @@ export default function TripDetail() {
             showIcon
             title="这次生成没有完成"
             description={trip.genError ?? '生成失败，已排好的天不受影响。可回到新建流程重新触发。'}
+          />
+        )}
+        {/* partial：部分天没排出来。与 failed 的差别是「大部分是好的」，
+            所以提示语气更轻、并指出缺了哪几天（报告 A08） */}
+        {trip.status === 'partial' && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="warning"
+            showIcon
+            title="行程只排好了一部分"
+            description={
+              trip.genError ??
+              `共 ${trip.days} 天，实际排好了 ${trip.tripDays.length} 天。缺失的天可回到新建流程点「继续生成」补齐。`
+            }
+          />
+        )}
+        {/* AI 自动修正过的安排（报告 A09）：让用户能主动核查生成质量 */}
+        {(trip.genWarnings?.length ?? 0) > 0 && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="info"
+            showIcon
+            title={`AI 自动调整了 ${trip.genWarnings!.length} 处安排`}
+            description={
+              <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+                {trip.genWarnings!.map((warning, index) => (
+                  <li key={index}>{warning}</li>
+                ))}
+              </ul>
+            }
           />
         )}
       </Card>

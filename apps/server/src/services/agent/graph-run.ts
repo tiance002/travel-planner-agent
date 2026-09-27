@@ -11,6 +11,8 @@ import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite'
 import { Command } from '@langchain/langgraph'
 import path from 'node:path'
 import { prisma } from '../../db'
+import { poiFromStay } from '../../domain/poi-mapper'
+import { parseJsonArray } from '../../utils/json'
 import { getWeather, type Poi, type WeatherCast } from '../amap'
 import { getCredentialsForUser } from '../llm'
 import { type PlannedDay } from './scheduler'
@@ -442,46 +444,67 @@ function createDecisionRecorder(tripId: string) {
   }
 }
 
+/**
+ * 单天落库。
+ *
+ * 见审查报告 A07 / 3.4：原来的实现是「先 deleteMany 再 create」两条独立语句，
+ * 如果 create 失败（约束冲突、连接中断、进程被杀），这一天原有的数据已经被删掉、
+ * 新数据又没写进去——用户的行程凭空少了一天。
+ *
+ * 现在用 prisma.$transaction 把两条语句包成一个原子操作：
+ * 要么「删旧 + 写新」全部成功，要么全部回滚，绝不出现中间态。
+ * 事务超时留得比默认宽裕一些：单天条目数不多，但要给慢盘留余量。
+ */
 async function persistDay(
   tripId: string,
   day: PlannedDay,
   date: Date,
   weather: WeatherCast | null,
 ): Promise<void> {
-  await prisma.tripDay.deleteMany({ where: { tripId, dayIndex: day.dayIndex } })
-  await prisma.tripDay.create({
-    data: {
-      tripId,
-      dayIndex: day.dayIndex,
-      date,
-      summary: day.summary || null,
-      weather: weather ? JSON.stringify(weather) : null,
-      dayType: day.dayType,
-      intensity: day.intensity,
-      items: {
-        create: day.items.map((item) => ({
-          orderIndex: item.orderIndex,
-          slot: item.slot,
-          itemType: item.itemType,
-          poiId: item.poiId,
-          name: item.name,
-          lng: item.lng,
-          lat: item.lat,
-          address: item.address || null,
-          tel: item.tel || null,
-          rating: item.rating,
-          cost: item.cost,
-          tag: item.tag || null,
-          typecode: item.typecode || null,
-          openTimeText: item.openTimeText || null,
-          note: item.note || null,
-          photos: item.photos.length > 0 ? JSON.stringify(item.photos) : null,
-        })),
-      },
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.tripDay.deleteMany({ where: { tripId, dayIndex: day.dayIndex } })
+      await tx.tripDay.create({
+        data: {
+          tripId,
+          dayIndex: day.dayIndex,
+          date,
+          summary: day.summary || null,
+          weather: weather ? JSON.stringify(weather) : null,
+          dayType: day.dayType,
+          intensity: day.intensity,
+          items: {
+            create: day.items.map((item) => ({
+              orderIndex: item.orderIndex,
+              slot: item.slot,
+              itemType: item.itemType,
+              poiId: item.poiId,
+              name: item.name,
+              lng: item.lng,
+              lat: item.lat,
+              address: item.address || null,
+              tel: item.tel || null,
+              rating: item.rating,
+              cost: item.cost,
+              tag: item.tag || null,
+              typecode: item.typecode || null,
+              openTimeText: item.openTimeText || null,
+              note: item.note || null,
+              photos: item.photos.length > 0 ? JSON.stringify(item.photos) : null,
+            })),
+          },
+        },
+      })
     },
-  })
+    { timeout: 15000 },
+  )
 }
 
+/**
+ * 住宿锚点还原成 POI。统一走 domain/poi-mapper（报告 5.3）：
+ * 这里原本是一份手写的 20 行构造，与 trips.ts、scheduler.ts 的另外两份各写各的，
+ * 字段填充规则还不一致——现在三处共用同一个实现。
+ */
 async function loadStayPoi(trip: {
   stayResolved: boolean
   stayPoiId: string | null
@@ -489,41 +512,13 @@ async function loadStayPoi(trip: {
   stayLng: number | null
   stayLat: number | null
 }) {
-  if (!trip.stayResolved || !trip.stayPoiId || trip.stayLng === null || trip.stayLat === null) {
-    return null
-  }
-  return {
-    poi: {
-      poiId: trip.stayPoiId,
-      name: trip.stayName ?? '住宿地',
-      lng: trip.stayLng,
-      lat: trip.stayLat,
-      address: '',
-      type: '住宿服务',
-      typecode: '100000',
-      cityName: '',
-      district: '',
-      adcode: '',
-      rating: null,
-      cost: null,
-      tag: '',
-      keytag: '',
-      openTimeToday: '',
-      openTimeWeek: '',
-      tel: '',
-      photos: [],
-      distance: null,
-    } as Poi,
-  }
+  const poi = poiFromStay(trip)
+  return poi ? { poi } : null
 }
 
+/** 兼容旧调用点：解析 JSON 数组。实现已收敛到 utils/json.ts（报告 5.1） */
 function safeParseArray(value: string): string[] {
-  try {
-    const parsed = JSON.parse(value)
-    return Array.isArray(parsed) ? parsed.map(String) : []
-  } catch {
-    return []
-  }
+  return parseJsonArray(value)
 }
 
 function formatDate(date: Date): string {

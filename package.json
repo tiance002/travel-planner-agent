@@ -17,7 +17,11 @@
     "check:credential": "npm run check:credential -w @travel/server --",
     "check:parser": "npm run check:parser -w @travel/server",
     "check:scheduler": "npm run check:scheduler -w @travel/server",
-    "build": "npm run build -w @travel/server && npm run build -w @travel/web"
+    "check:graph": "npm run check:graph -w @travel/server",
+    "typecheck": "npm run typecheck -w @travel/server && npm run typecheck -w @travel/web",
+    "test": "npm run check:parser && npm run check:scheduler && npm run check:graph",
+    "build": "npm run build -w @travel/server && npm run build -w @travel/web",
+    "ci": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
     "concurrently": "^10.0.5"

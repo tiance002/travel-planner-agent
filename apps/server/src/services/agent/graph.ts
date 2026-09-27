@@ -181,8 +181,26 @@ interface CandidateStats {
   spotCount: number
 }
 
-function statsOf(day: PlannedDay): CandidateStats {
-  const spots = day.items.filter((item) => item.itemType === 'spot')
+/**
+ * 去重 warnings 并保持原有顺序。
+ *
+ * 见审查报告 A09：同一条通勤修正提示可能因为重试、多次体检被重复累积，
+ * 不去重的话前端会看到一堆一字不差的重复行，重要提示反而被淹没。
+ * 用 Map 做「保序去重」——比 Set 更能保证首次出现的位置不被改变。
+ */
+function dedupeWarnings(warnings: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const warning of warnings) {
+    const text = warning.trim()
+    if (!text || seen.has(text)) continue
+    seen.add(text)
+    result.push(text)
+  }
+  return result
+}
+
+function statsOf(day: PlannedDay): CandidateStats {  const spots = day.items.filter((item) => item.itemType === 'spot')
   const ratingAvg =
     spots.length > 0
       ? spots.reduce((sum, item) => sum + (item.rating ? Number(item.rating) : 0), 0) / spots.length
@@ -263,7 +281,13 @@ async function estimateTransitMinutes(
 }
 
 /**
- * 一整天的公共交通总耗时：住处→首站 + 相邻各段（与驾车统计同口径）。
+ * 一整天的公共交通总耗时：住处→首站 + 相邻各段 + 末站→住处（与驾车统计同口径）。
+ *
+ * 见审查报告 A11 / 4.2：原来的 points 从住宿开始，但**末尾没有再次追加 anchor**，
+ * 于是只算了「住处 → 第一站 → …… → 最后一站」，漏掉了「最后一站 → 住处」的返程。
+ * 结果是公交总耗时系统性偏小，用户看到「通勤 40 分钟」实际要花 70 分钟。
+ * 驾车闭环（scheduler 的 optimizeCommute）是算了往返的，两边口径必须一致。
+ *
  * 某段查不到公交方案就跳过；全都没有时返回 null（前端展示「公交未知」）。
  * 导出供自检脚本直接验证组装逻辑。
  */
@@ -272,11 +296,14 @@ export async function estimateTransitTotal(
   anchor: Poi,
   cityAdcode: string,
 ): Promise<number | null> {
+  // 首尾都用住宿锚点收口，形成闭环：住处 → 各站 → 住处
+  const stay = { lng: anchor.lng, lat: anchor.lat }
   const points: ({ lng: number; lat: number } | null)[] = [
-    { lng: anchor.lng, lat: anchor.lat },
+    stay,
     ...day.items.map((item) =>
       item.lng != null && item.lat != null ? { lng: item.lng, lat: item.lat } : null,
     ),
+    stay, // 返程：最后一站 → 住处。缺了它总耗时就是偏小的
   ]
   const segments: number[] = []
   for (let i = 1; i < points.length; i++) {
@@ -381,6 +408,10 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         genDayIndex: dayIndex,
         genProgress: `第 ${dayIndex}/${state.totalDays} 天已完成`,
         genReview: null, // 待确认卡片已裁决，撤下
+        // 累积的规则修正提示随天推进逐步落库（报告 A09）：万一行程在中途失败，
+        // 已经产生的提示也不会丢——它们是用户判断「AI 排得靠不靠谱」的唯一线索。
+        genWarnings:
+          warnings.length > 0 ? JSON.stringify(dedupeWarnings(warnings).slice(-50)) : null,
       },
     })
 
@@ -727,7 +758,37 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         }
       }
 
-      const chosen = candidates.find((c) => c.label === answer?.choice) ?? candidates[0]
+      if (answer?.decision === 'choose') {
+        // 传了 choose 但 choice 不是 A/B：不替用户做决定。
+        // 报告 A03 点名的风险正是「无合法 choice 时静默采用 A」——
+        // 那等于用户以为在挑选，实际被系统替他选了。这里降级为
+        // 「按用户没给定论处理」：回 planDay 换一批候选重排，
+        // 既不吞掉用户意图，也不会推进一个未经确认的方案。
+        if (answer.choice !== 'A' && answer.choice !== 'B') {
+          ctx.log(`第 ${dayIndex} 天收到无效的方案选择，改为重新生成候选`)
+          return {
+            dayFeedback: '用户没能选定方案，请换一批不同的地点重新安排这一天的行程',
+            pendingCandidates: null,
+            pendingDay: null,
+          }
+        }
+      }
+
+      // 只接受显式选择了合法 label 的情况；approve 与「没给 answer」的兜底
+      // 都按「未指定」处理——但注意路由层已保证不会走到这里：review-confirm
+      // 对 choose 强制要求合法 choice，非法请求直接 400。
+      const chosen = answer?.decision === 'choose'
+        ? candidates.find((c) => c.label === answer.choice)
+        : undefined
+      if (!chosen) {
+        ctx.log(`第 ${dayIndex} 天未收到有效的方案选择，改为重新生成候选`)
+        return {
+          dayFeedback: '请重新生成这一天的候选方案',
+          pendingCandidates: null,
+          pendingDay: null,
+        }
+      }
+
       ctx.log(`第 ${dayIndex} 天用户选择了方案${chosen.label}`)
       const deltas = await commitDay(state, chosen.day, chosen.warnings)
       return { ...deltas, pendingCandidates: null, pendingDay: null }
@@ -767,12 +828,59 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   }
 
   // ---- 节点：收尾 ----------------------------------------------------------
-  const finalizeNode: GraphNode<typeof AgentGraphState> = async () => {
+  // 见审查报告 A08 / 3.3：「全部天都被跳过」不等于「行程生成成功」。
+  // 原来的实现无条件写 ready，于是一个 5 天的行程只有 4 个 TripDay 时
+  // 也会显示「已完成」，用户点进去发现少了一天却看不到任何解释。
+  //
+  // 这里在写状态前**回查数据库**：实际落库的天数是否等于行程天数。
+  //   - 相等 → ready（真正完成）
+  //   - 不相等 → partial，并把缺失的天号与累积的 warnings 一并返回前端
+  // 回查数据库而不是依赖图内计数，是因为「跳过」分支并不落库，
+  // 只有库里的实际行数才是真相。
+  const finalizeNode: GraphNode<typeof AgentGraphState> = async (state) => {
+    const persisted = await prisma.tripDay.findMany({
+      where: { tripId: ctx.tripId },
+      orderBy: { dayIndex: 'asc' },
+      select: { dayIndex: true },
+    })
+    const persistedDays = new Set(persisted.map((day) => day.dayIndex))
+    const missingDays: number[] = []
+    for (let day = 1; day <= state.totalDays; day++) {
+      if (!persistedDays.has(day)) missingDays.push(day)
+    }
+
+    const warnings = dedupeWarnings(state.warnings)
+
+    if (missingDays.length === 0) {
+      await prisma.trip.update({
+        where: { id: ctx.tripId },
+        data: {
+          status: 'ready',
+          genProgress: null,
+          genError: null,
+          genReview: null,
+          genWarnings: warnings.length > 0 ? JSON.stringify(warnings.slice(-50)) : null,
+        },
+      })
+      ctx.log('全部完成')
+      return { finished: true }
+    }
+
+    // 存在缺失天：标记 partial，而不是假装成功
+    const summary = `已完成 ${persistedDays.size}/${state.totalDays} 天，第 ${missingDays.join('、')} 天未能生成`
+    ctx.log(summary)
+    ctx.recordDecision(`行程部分完成：${summary}`)
     await prisma.trip.update({
       where: { id: ctx.tripId },
-      data: { status: 'ready', genProgress: null, genError: null, genReview: null },
+      data: {
+        status: 'partial',
+        genProgress: null,
+        genError: summary,
+        genReview: null,
+        genWarnings:
+          JSON.stringify([...warnings, `缺失的天：${missingDays.join('、')}`].slice(-50)),
+      },
     })
-    ctx.log('全部完成')
     return { finished: true }
   }
 

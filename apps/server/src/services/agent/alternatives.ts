@@ -16,6 +16,7 @@ import { MAX_COMMUTE_MINUTES } from './scheduler'
 import {
   checkSlotHours,
   isRatingReject,
+  matchesHike,
   nightKind,
   type DayTypeBan,
   type NightKind,
@@ -124,7 +125,7 @@ export async function findAlternatives(
       // 营业时间与当前时段冲突的不要
       if (checkSlotHours(poi, input.slot, wantRestaurant).verdict === 'closed') continue
       // 用户勾了不爬山，就不要推爬山地点
-      if (input.ban?.noHike && matchesHikeKeyword(poi)) continue
+      if (input.ban?.noHike && matchesHike(poi)) continue
       // 夜生活去重：已去过酒吧就别再推酒吧（目标自己不算，调用方已排除）
       if (input.forbiddenNightKinds && input.forbiddenNightKinds.size > 0) {
         const kind = nightKind(poi)
@@ -177,14 +178,26 @@ export async function findAlternatives(
 
   return enriched
     .filter((item): item is AlternativeCandidate => item !== null)
-    // 按「两段通勤之和」升序：最顺路的排最前面。算不出来的当作 0，排在前面
-    // （它们其实是最不确定的，但排后面用户根本看不到）
-    .sort(
-      (a, b) =>
-        (a.commuteFromPrevMinutes ?? 0) +
-        (a.commuteToNextMinutes ?? 0) -
-        ((b.commuteFromPrevMinutes ?? 0) + (b.commuteToNextMinutes ?? 0)),
-    )
+    // 排序（见审查报告 A12 / 4.3）：
+    //   原来的写法是 `(a.commuteFromPrevMinutes ?? 0) + (a.commuteToNextMinutes ?? 0)`，
+    //   把「路线查询失败 = null」当成了 0，于是这些最不确定的候选反而排到最前面——
+    //   用户看到的头几个「最顺路」推荐，其实是根本没算出路线的。
+    //
+    //   现在的规则：两段都拿到真实耗时的排前面（按总和升序）；
+    //   只要有一段是 null，就归入「unknown」组，统一排在已知组之后
+    //   （同组内按已知的那一段之和排序，未知的按直线距离兜底，保持稳定可预期）。
+    .sort((a, b) => {
+      const aUnknown = a.commuteFromPrevMinutes === null || a.commuteToNextMinutes === null
+      const bUnknown = b.commuteFromPrevMinutes === null || b.commuteToNextMinutes === null
+      if (aUnknown !== bUnknown) return aUnknown ? 1 : -1
+
+      const aSum = (a.commuteFromPrevMinutes ?? 0) + (a.commuteToNextMinutes ?? 0)
+      const bSum = (b.commuteFromPrevMinutes ?? 0) + (b.commuteToNextMinutes ?? 0)
+      if (aSum !== bSum) return aSum - bSum
+
+      // 完全并列时用直线距离做稳定兜底，避免结果顺序随机漂移
+      return a.distanceFromPrevKm - b.distanceFromPrevKm
+    })
     .slice(0, MAX_CANDIDATES)
 }
 
@@ -202,10 +215,4 @@ async function routeMinutes(from: Poi, to: Poi): Promise<number | null> {
   } catch {
     return null
   }
-}
-
-/** 兜底用的高强度地点判断 */
-function matchesHikeKeyword(poi: Poi): boolean {
-  const text = `${poi.name} ${poi.tag} ${poi.keytag} ${poi.type}`
-  return /登山|徒步|索道|爬山|栈道|山顶|峡谷/.test(text)
 }

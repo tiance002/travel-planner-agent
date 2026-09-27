@@ -12,6 +12,7 @@ import type { NextFunction, Request, Response } from 'express'
 import { z } from 'zod'
 import { config } from '../config'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rate-limit'
 import {
   AmapError,
   geocode,
@@ -27,6 +28,19 @@ export const amapRouter = Router()
 
 // 高德所有能力都要求登录后再用，避免被当作公开代理刷配额
 amapRouter.use(requireAuth)
+
+// 配额保护（见审查报告 A04 / 9.3）：
+// 高德 Web 服务 Key 是自家付费配额，登录用户也不该无限刷。
+// 按用户维度限流——正常浏览时（有缓存兜底）每分钟几十次足够；
+// 生成行程时的批量路线查询走的是后端内部调用，不经过这里，不会被误伤。
+amapRouter.use(
+  rateLimit({
+    prefix: 'amap',
+    limit: 120,
+    windowMs: 60 * 1000,
+    message: '地图查询过于频繁，请稍后再试',
+  }),
+)
 
 /**
  * 统一的处理包装：把高德返回的业务错误转成 502（上游服务异常），

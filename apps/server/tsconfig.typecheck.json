@@ -1,0 +1,22 @@
+{
+  // 全量类型检查专用配置（见审查报告 A06）。
+  //
+  // 为什么需要单独一份：
+  //   应用自身的 tsconfig.json 的 rootDir 是 src、include 也只含 src/**/*.ts，
+  //   于是 apps/server/scripts/** 里的自检脚本**根本不参与构建时的类型检查**。
+  //   后果就是 try-generate.ts 里那条 `import { generateTrip } from '../src/services/agent'`
+  //   在旧模块被删除后无人发现，脚本静默失效了很久。
+  //
+  //   npm run typecheck 用这份配置同时覆盖 src 与 scripts：
+  //   不开 emit（只做检查），rootDir 设为 apps/server 以容纳两个目录。
+  //
+  // 注意：这里 include 的是 scripts/**，而 scripts 是顶层目录，
+  // 所以 ".." 之外的相对导入（如 ../src/db）都能正确解析。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "outDir": "dist-typecheck"
+  },
+  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+}
