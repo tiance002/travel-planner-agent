@@ -16,7 +16,11 @@
     "check:credential": "tsx scripts/check-credential.ts",
     "check:parser": "tsx scripts/check-parser.ts",
     "check:scheduler": "tsx scripts/check-scheduler.ts",
-    "check:graph": "tsx scripts/check-graph.ts"
+    "check:graph": "tsx scripts/check-graph.ts",
+    "check:ssrf": "tsx scripts/check-ssrf.ts",
+    "check:runlock": "tsx scripts/check-runlock.ts",
+    "check:agent": "tsx scripts/check-agent.ts",
+    "test": "npm run check:ssrf && npm run check:runlock && npm run check:agent && npm run check:parser && npm run check:scheduler && npm run check:graph"
   },
   "dependencies": {
     "@langchain/core": "1.2.11",

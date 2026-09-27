@@ -238,11 +238,6 @@ export default function TripDetail() {
 
   const [trip, setTrip] = useState<TripDetailData | null>(null)
 
-  // 轮询判定需要读到「最新的」生成状态，但又不该把它写进 effect 依赖
-  // （那正是原来轮询停摆的原因）。用 ref 桥接：每次 render 同步一次，
-  // 轮询循环随时读到的都是最新值，而循环本身不被状态变化打断。
-  const tripRef = useRef<TripDetailData | null>(null)
-  tripRef.current = trip
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
 
@@ -316,17 +311,19 @@ export default function TripDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  // 生成中的行程持续轮询（见审查报告 A13 / 3.2）。
+  // 生成中的行程持续轮询（见审查报告 A13 / 3.2、任务4）。
   //
-  // 修复点：原实现用 `useEffect(() => setTimeout(..., 2500), [trip.status, trip.genDayIndex])`，
-  // 一旦某次拉回来的状态没有变化（status 仍是 generating、genDayIndex 还是 null），
-  // 依赖数组不变 → effect 不重跑 → 不会设置下一个定时器 → 轮询彻底停摆。
+  // 修复点一（原实现）：`useEffect(() => setTimeout(..., 2500), [trip.status, trip.genDayIndex])`
+  //   一旦某次拉回来的状态没有变化，依赖数组不变 → effect 不重跑 → 不再设下一个
+  //   定时器 → 轮询彻底停摆。
+  // 修复点二（任务4）：改用 hook 之后如果还靠「组件里的 trip 状态」判断要不要启动，
+  //   首次打开一个正在生成的行程时，数据尚未加载（trip 为 null），判断为 false，
+  //   首屏轮询同样不会启动。
   //
-  // 现在交给 useGenerationPolling：由「上一次请求结束」驱动「下一次请求」，
-  // 只要还在生成中就永不间断。依赖只有 tripId，不受状态更新时间点的影响。
+  // 现在交给 useGenerationPolling：进入即无条件先拉一次，由**服务端返回的状态**
+  // 决定是否继续；只要还在生成中就永不间断，网络失败也会自动重试。
   useGenerationPolling<TripDetailData>({
     tripId: id,
-    isGenerating: () => tripRef.current?.status === 'generating',
     fetch: loadTrip,
     getStatus: (data) => data.status,
     intervalMs: 2500,

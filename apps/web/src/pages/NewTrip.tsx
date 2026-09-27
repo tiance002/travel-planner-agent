@@ -102,6 +102,14 @@ const listHintStyle = (token: GlobalToken): React.CSSProperties => ({
 const MAX_DAYS = 15
 
 /**
+ * 轮询连续失败多少次后才放弃（任务4）。
+ *
+ * 取 5：按 2.5 秒的间隔算，约 12 秒的容忍窗口——足够跨过一次网络抖动或
+ * 后端短暂重启，又不会让用户对着一个真的挂掉的页面无限等待。
+ */
+const MAX_POLL_FAILURES = 5
+
+/**
  * 行程概览里的一格信息。
  *
  * 为什么不用 Descriptions：带边框的 Descriptions 是一张表格，
@@ -224,6 +232,8 @@ export default function NewTrip() {
   /** 生成过程中服务端自动修正过的规则提示（通勤超时换点、天型降档等） */
   const [genWarnings, setGenWarnings] = useState<string[]>([])
   const pollTimer = useRef<number | null>(null)
+  /** 连续轮询失败次数（任务4）。成功一次即归零，用于区分「偶发抖动」与「持续不可达」 */
+  const pollFailuresRef = useRef(0)
 
   // --- 图版专属的两个开关（LangGraph 编排） ---------------------------------
   /** 逐天人工确认：每排完一天暂停，展示摘要，等用户点头再排下一天 */
@@ -390,6 +400,8 @@ export default function NewTrip() {
       }>(`/trips/${tripId}`)
 
       const trip = data.trip
+      // 拉取成功即重置失败计数，保证「偶发抖动」永远不会累积到放弃阈值
+      pollFailuresRef.current = 0
       // partial = 部分完成（有跳过的天）。它属于「已结束」而不是「进行中」，
       // 所以同样要停止轮询、把 generating 关掉（见报告 A08）。
       setGenStatus(trip.status as GenStatus)
@@ -418,6 +430,16 @@ export default function NewTrip() {
         setGenerating(false)
       }
     } catch (err) {
+      // 网络偶发失败不应终结轮询（见审查报告任务4 第4点）。
+      //
+      // 原实现一遇到异常就 setGenerating(false)，等于「一次抖动 = 进度条永远卡住」，
+      // 用户完全不知道后台其实还在生成。这里改成：只要用户还停留在生成态，
+      // 就隔一会儿重试；连续失败若干次后才真正放弃并给提示，避免无限空转。
+      pollFailuresRef.current += 1
+      if (pollFailuresRef.current <= MAX_POLL_FAILURES) {
+        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
+        return
+      }
       setGenError(extractError(err, '读取生成状态失败，请刷新页面查看'))
       setGenerating(false)
     }
@@ -439,6 +461,8 @@ export default function NewTrip() {
 
     const actualMode = reviewEnabled ? 'review' : mode
     setGenerating(true)
+    // 新一轮生成从零计失败次数（任务4），避免上一轮的残余计数立刻触发放弃
+    pollFailuresRef.current = 0
     setGenError('')
     setReviewRequest(null)
     setReviewFeedback('')

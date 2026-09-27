@@ -133,6 +133,16 @@ async function requestOnce(request: ChatRequest, body: Record<string, unknown>, 
     throw new RetryableModelError(`模型接口连接中断（HTTP ${response.status}）`)
   })
 
+  // 显式拒绝 3xx（见审查报告 A01 / 9.2 第 3 条）。
+  // redirect:'manual' 只保证不自动跟随跳转，但 3xx 状态码本身还是会回到这里。
+  // 必须显式当错误处理：否则「先给公网地址、再 302 到内网」这条绕过路径依然成立。
+  // 归类为不可重试错误——重定向是配置/攻击信号，重试没有意义。
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error(
+      `模型接口返回了重定向（HTTP ${response.status}），出于安全考虑不会跟随跳转，请直接填写最终接口地址`,
+    )
+  }
+
   if (!response.ok) {
     // 5xx 与 429 是上游临时性故障，值得重试；4xx（如 Key 无效）重试没有意义
     if (response.status >= 500 || response.status === 429) {

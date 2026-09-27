@@ -38,13 +38,24 @@ function sweep(now: number) {
   }
 }
 
-/** 取客户端标识：优先 X-Forwarded-For 的第一段（部署在反代后面时），否则用 socket 地址 */
+/**
+ * 取客户端标识（见审查报告 A04 / 任务3）。
+ *
+ * 关键安全修正：**不再直接读 X-Forwarded-For**。
+ *
+ * 原实现是「优先取 XFF 的第一段，取不到才用 req.ip」，这等于把限流身份键
+ * 交给客户端自己决定——攻击者只要每次请求换一个 XFF 值，就永远落在不同的
+ * 限流桶里，限流形同虚设。
+ *
+ * 正确做法：只信 `req.ip`。它的可信度由 app.set('trust proxy', ...) 决定：
+ *   - 未配置 trust proxy（默认）：req.ip 是 TCP 对端地址，客户端伪造头部无效；
+ *   - 配置了可信代理：Express 会按信任链从右往左解析 XFF，只采信可信代理
+ *     追加的那一段，客户端自己塞进去的前缀会被正确忽略。
+ *
+ * 也就是说「支不支持反代」这件事收敛到了 index.ts 的一行配置里，
+ * 这里只消费已经可信的结论，不再自己做头解析。
+ */
 export function clientIp(req: Request): string {
-  const forwarded = req.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    const first = forwarded.split(',')[0]?.trim()
-    if (first) return first
-  }
   return req.ip ?? req.socket.remoteAddress ?? 'unknown'
 }
 

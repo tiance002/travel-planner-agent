@@ -8,9 +8,9 @@ import type { Request } from 'express'
 import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
-import { concurrencyGuard } from '../middleware/rate-limit'
 import { poiFromStay, poiFromTripItem } from '../domain/poi-mapper'
 import { generateTripWithGraph, resumeTripReview } from '../services/agent/graph-run'
+import { acquireRun, releaseRun } from '../services/agent/run-lock'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById } from '../services/amap'
@@ -214,9 +214,13 @@ tripsRouter.patch('/:id/stay', async (req, res, next) => {
 // AI 生成行程
 // ---------------------------------------------------------------------------
 
-// 判定「卡住的生成任务」的时间。超过这个时长的 generating 记录视为上次进程重启遗留，
-// 允许重新触发，避免用户永远等一个不会完成的进度。
-const STALE_GENERATING_MS = 10 * 60 * 1000
+// 判定「卡住的生成任务」的时间。
+//
+// ⚠️ 已废弃（见审查报告任务7）：原来用「updatedAt 超过 10 分钟」判定僵尸任务，
+// 这是错的——任务正常跑 20 分钟、等待人工裁决、用户改了标题，updatedAt 都可能
+// 长时间不变，但它们都不是崩溃。现在僵尸判定改由 run-lock.ts 的**心跳**完成：
+// 只有「持锁任务的心跳停止」才说明进程真的死了。
+// 这行常量保留仅为记录历史决策，不再参与任何夺权逻辑。
 
 // 触发生成时可选的两档语义：
 //   continue —— 保留已经排好的天，从第一个空缺的天接着排（默认，失败后重试也走这条）
@@ -233,31 +237,31 @@ const generateSchema = z.object({
 /**
  * 原子抢锁：把 Trip 从「空闲」推进到「generating」。
  *
- * 见审查报告 A02。原来的写法是「先 findFirst 读状态 → 判断 → 再 update」，
+ * 见审查报告 A02 与任务2。原来的写法是「先 findFirst 读状态 → 判断 → 再 update」，
  * 两个并发请求会在第一次读时都看到可生成状态，于是都往下走、
  * 各自启动一轮生成——同一个 Trip 跑两张图，落库互相覆盖、模型额度双倍消耗。
  *
  * 这里改用**带条件的单条 updateMany**：把状态判断直接写进 WHERE，
  * 由数据库保证「读」与「写」是同一个原子动作。返回是否抢到。
  *
- * 三类可抢的情形：
- *   - 不是 generating（draft/failed/ready/partial 都允许重新生成）；
- *   - generating 但已超过 STALE_GENERATING_MS（上次进程重启留下的僵尸任务）；
- *   - 状态恰好等于我们传入的期望值（review-confirm 场景）。
- * 除「正在生成且未过期」外，其余都放行——这与原逻辑的语义完全一致。
+ * 与 run-lock.ts 的关系（任务2/任务7 的重要修正）：
+ *   本函数只负责「状态机」这一层（draft/failed/ready/partial → generating）。
+ *   真正防止「同一个任务跑两遍」的**运行锁**是 run-lock.ts 的 acquireRun——
+ *   它管的是「后台任务是否还在跑」，生命周期覆盖整个生成而不是一个 HTTP 请求。
+ *   两者配合：先抢运行锁（防重复任务），再推进状态机（防前端显示错乱）。
+ *
+ * 注意：STALE_GENERATING_MS 已经**不再用于夺取任务所有权**（任务7 明确禁止
+ * 「依靠固定超时直接夺取任务所有权」）。僵尸判定改由心跳完成，见 run-lock.ts。
  */
-async function acquireGenerationLock(
+async function markGenerating(
   tripId: string,
   data: { genProgress: string; genError: null; genReview: null },
 ): Promise<boolean> {
-  const staleBefore = new Date(Date.now() - STALE_GENERATING_MS)
   const result = await prisma.trip.updateMany({
     where: {
       id: tripId,
-      OR: [
-        { status: { not: 'generating' } },
-        { status: 'generating', updatedAt: { lt: staleBefore } },
-      ],
+      // 不是 generating 的状态都可以推进（draft/failed/ready/partial）
+      status: { not: 'generating' },
     },
     // 新一轮生成清空上一轮的失败原因与提示，避免旧提示串到新结果里
     data: { status: 'generating', genWarnings: null, ...data },
@@ -268,17 +272,8 @@ async function acquireGenerationLock(
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
 tripsRouter.post(
   '/:id/generate',
-  // 并发背压（见报告 A04 / 9.3）：同一用户同时只允许跑 1 个生成任务。
-  // 与下面的原子抢锁互补——抢锁管「同一个 Trip 不会跑两遍」，
-  // 这里管「同一个用户不会同时开好几张图」。
-  concurrencyGuard({
-    prefix: 'generate',
-    max: 1,
-    message: '你还有一个行程正在生成中，请等它完成后再试',
-  }),
-  // 显式标注 req 的 params 类型：这条路由挂了并发背压中间件（两个 handler），
-  // Express 5 的变参重载在这种情况下无法从路径字符串推断出 `:id`，
-  // 会让 req.params.id 退化成 `string | string[]`。这里手动收窄回 `string`。
+  // 显式标注 req 的 params 类型：Express 5 在多 handler 情况下无法从路径字符串
+  // 推断出 `:id`，会让 req.params.id 退化成 `string | string[]`。这里手动收窄。
   async (req: Request<{ id: string }>, res, next) => {
     try {
       const parsed = generateSchema.safeParse(req.body ?? {})
@@ -290,43 +285,60 @@ tripsRouter.post(
 
       const trip = await prisma.trip.findFirst({
         where: { id: req.params.id, userId: req.user!.userId },
-        select: { id: true, status: true, updatedAt: true },
+        select: { id: true, status: true, userId: true },
       })
       if (!trip) {
         res.status(404).json({ error: '行程不存在' })
         return
       }
 
-      // 原子抢锁（见报告 A02）：状态判断与更新合并成一条带条件的 updateMany，
-      // 并发点击时只有一个请求能抢到，另一个会拿到 count = 0。
-      // 这与原来的「先读后判再写」语义相同，但没有竞态窗口。
-      const acquired = await acquireGenerationLock(trip.id, {
+      // 第一步：抢运行锁（任务2）。
+      // 这是真正的并发控制——它看的是「后台还有没有任务在跑」，而不是
+      // 「此刻有没有 HTTP 请求进来」。响应早就返回了，但锁要等任务结束才放。
+      const acquired = await acquireRun(trip.id, trip.userId)
+      if (!acquired.ok) {
+        res.status(409).json({
+          error:
+            acquired.reason === 'user_busy'
+              ? '你还有一个行程正在生成中，请等它完成后再试'
+              : '这个行程正在生成中，请稍候',
+        })
+        return
+      }
+
+      // 第二步：推进状态机。若状态机因竞态没推进成功（例如刚刚被别的路径改过），
+      // 要把刚抢到的锁放掉，避免留下没人用却占着的锁。
+      const marked = await markGenerating(trip.id, {
         genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
         genError: null,
         genReview: null,
       })
-
-      if (!acquired) {
-        // 没抢到 = 已经有另一个请求把它推进了 generating 且未过期
+      if (!marked) {
+        await releaseRun(trip.id, acquired.runId)
         res.status(409).json({ error: '这个行程正在生成中，请稍候' })
         return
       }
 
       // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
       // 失败时把原因写进 genError，前端就能直接展示给用户看。
-      //
-      // 编排只有 LangGraph 图版一条路径了（手写版 index.ts 已删，能力被完全覆盖：
-      // 节点级断点、逐天确认/驳回、并行双方案、失败重试都是图版专属）。
+      // runId 一起传下去：图在运行期间靠它续心跳、做写入归属校验。
       const parallelCandidates = parsed.data.parallel ? 2 : 1
-      void generateTripWithGraph(trip.id, { mode, parallelCandidates }).catch(async (error: unknown) => {
+      void generateTripWithGraph(trip.id, {
+        mode,
+        parallelCandidates,
+        runId: acquired.runId,
+      }).catch(async (error: unknown) => {
         const message = error instanceof Error ? error.message : '生成失败'
         console.error(`[生成 ${trip.id}] 失败：${message}`)
+        // 兜底清状态：正常情况下 graph-run 的 finally 已经处理过，
+        // 这里只覆盖「图内部抛错且没能自己收尾」的极端情况。
         await prisma.trip
           .update({
             where: { id: trip.id },
             data: { status: 'failed', genProgress: null, genError: message, genReview: null },
           })
           .catch(() => undefined)
+        await releaseRun(trip.id, acquired.runId)
       })
 
       res.status(202).json({ ok: true, status: 'generating', mode })
@@ -372,7 +384,7 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
   try {
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.id, userId: req.user!.userId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, genRunId: true, genReview: true },
     })
     if (!trip) {
       res.status(404).json({ error: '行程不存在' })
@@ -394,9 +406,18 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
       return
     }
 
+    // 必须**确实有**待确认内容才允许裁决（任务6）。
+    // 否则重复点击会一路走到 resume：虽然 resumeTripReview 内部还有原子领取，
+    // 但在路由层就挡掉能给出更明确的语义——「没有待确认内容」与「裁决成功」是两回事。
+    if (!trip.genReview) {
+      res.status(409).json({ error: '当前没有待确认的内容，可能已被处理' })
+      return
+    }
+
     // 与 generate 一样，后台恢复，接口立刻返回。
     // answer 携带用户的裁决：approve（确认采用）/ choose（选 A/B）/ reject（驳回，可附意见）。
     // parallel 由前端一并传回：确认后继续排的后续天，保持同样的并行设置。
+    // runId 沿用挂起任务的运行锁：等待期间锁没释放，恢复的正是同一个任务。
     void resumeTripReview(trip.id, {
       answer: {
         decision: confirmBody.decision,
@@ -404,6 +425,7 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
         feedback: confirmBody.decision === 'reject' ? confirmBody.feedback : undefined,
       },
       parallelCandidates: confirmBody.parallel ? 2 : 1,
+      runId: trip.genRunId,
     }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '确认失败'
       console.error(`[生成 ${trip.id}] 确认失败：${message}`)
@@ -413,6 +435,7 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
           data: { status: 'failed', genProgress: null, genError: message, genReview: null },
         })
         .catch(() => undefined)
+      if (trip.genRunId) await releaseRun(trip.id, trip.genRunId)
     })
 
     res.status(202).json({ ok: true, status: 'reviewing', decision: confirmBody.decision })

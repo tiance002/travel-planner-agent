@@ -112,6 +112,20 @@ export interface AgentGraphContext {
    * 完成后前端可回看「AI 是怎么排的」。写失败不影响生成主流程。
    */
   recordDecision: (text: string) => void
+  /**
+   * 模型对话的注入点（见审查报告任务9：测试必须覆盖生产实现）。
+   *
+   * 默认走真实的 runToolLoop（发网络请求给模型）。测试时注入一个假的，
+   * 就能驱动**同一份生产图**跑完全程——而不是像旧的 check-graph.ts 那样
+   * 另造一个「结构相似」的图来测。这样图拓扑、条件边、落库、状态推进
+   * 这些真正要验的东西才是被测对象。
+   */
+  chatClient?: typeof runToolLoop
+  /**
+   * 工具执行的注入点（同上）。默认走真实的 runTool（会打高德接口）。
+   * 测试时注入假实现，返回构造好的 POI，即可在零网络下验证完整流程。
+   */
+  toolRunner?: typeof runTool
 }
 
 /** 用户在「待确认」卡片上的裁决结果（由前端经 review-confirm 路由传回） */
@@ -332,6 +346,9 @@ export async function estimateTransitTotal(
 export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheckpointSaver) {
   /** 本会话是否为交互式（需要 interrupt 问用户）：逐天确认或并行择优任一开启 */
   const interactive = ctx.reviewMode || ctx.parallelCandidates > 1
+  // 依赖注入：默认用真实实现，测试时由 ctx 传入假实现（任务9）
+  const runToolLoopImpl = ctx.chatClient ?? runToolLoop
+  const runToolImpl = ctx.toolRunner ?? runTool
 
   // ---- 节点：锚点 ----------------------------------------------------------
   // 用户没选住宿时，让模型挑一个中心区域当锚点。
@@ -339,12 +356,12 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   const resolveAnchorNode: GraphNode<typeof AgentGraphState> = async () => {
     if (!ctx.anchor) {
       ctx.report('正在挑选住宿区域', { force: true })
-      const result = await runToolLoop({
+      const result = await runToolLoopImpl({
         credentials: ctx.credentials,
         systemPrompt: buildAnchorSystemPrompt(),
         userPrompt: buildAnchorUserPrompt({ ...ctx.basics, stay: null }),
         tools: TOOL_DEFINITIONS,
-        executeTool: (name, args) => runTool(name, args, ctx.toolContext),
+        executeTool: (name, args) => runToolImpl(name, args, ctx.toolContext),
         maxRounds: 8,
         log: ctx.log,
       })
@@ -386,6 +403,14 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
 
     await ctx.persistDay(day, new Date(dateKey), cast)
 
+    // 跨天累积 warnings（见审查报告任务8 第4~6点）。
+    //
+    // 这里必须把**前几天的 warnings 一起带上**：传进来的 `warnings` 只是
+    // 「这一天的」提示，而 state.warnings 是图状态里累积的全部。原来的实现
+    // 只写 `warnings`，等于每提交一天就把前面几天的提示覆盖掉——
+    // 用户最后只看到最后一天的问题，前面被自动修正过的异常全丢了。
+    const accumulated = dedupeWarnings([...state.warnings, ...warnings])
+
     // 跨天传导状态：这一天的地点进入去重清单，天型强度流向下一天
     const newPoiIds: string[] = []
     const newPlaces: string[] = []
@@ -410,8 +435,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         genReview: null, // 待确认卡片已裁决，撤下
         // 累积的规则修正提示随天推进逐步落库（报告 A09）：万一行程在中途失败，
         // 已经产生的提示也不会丢——它们是用户判断「AI 排得靠不靠谱」的唯一线索。
-        genWarnings:
-          warnings.length > 0 ? JSON.stringify(dedupeWarnings(warnings).slice(-50)) : null,
+        genWarnings: accumulated.length > 0 ? JSON.stringify(accumulated.slice(-50)) : null,
       },
     })
 
@@ -421,7 +445,10 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       previousPlaces: newPlaces,
       usedNightKinds: newNightKinds,
       previousDayState: { dayType: day.dayType, intensity: day.intensity },
-      warnings,
+      // 把累积结果写回状态，与落库内容保持一致（任务8第2点：
+      // 「保存成功与生成进度状态保持一致」）。传 day 的 warnings 会让
+      // 图状态与数据库分叉——一个累积、一个不累积。
+      warnings: accumulated,
       pendingDaySummary: day.summary || `${day.items.length} 个地点（${day.dayType}）`,
       pendingDay: null,
       pendingCandidates: null,
@@ -440,6 +467,14 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   // reviewDay 提交；驳回时把意见写进 dayFeedback，图回到本节点重排。
   const planDayNode: GraphNode<typeof AgentGraphState> = async (state) => {
     const dayIndex = state.dayIndex
+
+    // 断点续跑：这一天已经存在、不需要重排（见审查报告任务5）。
+    // 直接跳过——不调模型、不落库、不消耗额度，只把游标推进，
+    // 让后面真正缺失的天继续排队。这是「补中间缺失日不覆盖后续已有日」的关键。
+    if (state.gapDays.includes(dayIndex)) {
+      ctx.log(`第 ${dayIndex} 天已存在，跳过（断点续跑只补缺失的天）`)
+      return { dayIndex: dayIndex + 1 }
+    }
 
     try {
       const dateKey = addDays(ctx.basics.startDate, dayIndex - 1)
@@ -481,7 +516,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         }
 
         // ① 工具循环
-        const result = await runToolLoop({
+        const result = await runToolLoopImpl({
           credentials: ctx.credentials,
           systemPrompt: buildDaySystemPrompt(),
           userPrompt:
@@ -500,7 +535,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
               usedNightKinds: state.usedNightKinds,
             }) + feedbackNote,
           tools: TOOL_DEFINITIONS,
-          executeTool: (name, args) => runTool(name, args, candidateCtx),
+          executeTool: (name, args) => runToolImpl(name, args, candidateCtx),
           maxRounds: ctx.maxToolRounds,
           log: (line) =>
             ctx.log(ctx.parallelCandidates > 1 ? `[候选${candidateIndex + 1}] ${line}` : line),

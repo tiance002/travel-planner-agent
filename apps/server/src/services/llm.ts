@@ -75,6 +75,13 @@ export async function testCredentials(credentials: ModelCredentials): Promise<Te
         stream: false,
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      // 禁止自动跟随重定向（见审查报告 A01 / 9.2 第 3 条）。
+      //
+      // 为什么测试连接也必须关掉重定向：SSRF 校验只看用户填的那个地址，
+      // 攻击者完全可以让自己的公网域名返回 302，把请求跳到 169.254.169.254。
+      // 默认 fetch 会安静地跟过去，前面那层地址校验等于没做。
+      // 与 model-client.ts 保持一致：关掉自动跳转，把 3xx 当作错误拒绝。
+      redirect: 'manual',
     })
   } catch (error) {
     const latencyMs = Date.now() - startedAt
@@ -90,6 +97,17 @@ export async function testCredentials(credentials: ModelCredentials): Promise<Te
   }
 
   const latencyMs = Date.now() - startedAt
+
+  // 显式拒绝 3xx（见审查报告 A01）：redirect:'manual' 下服务器返回的重定向
+  // 不会再被自动跟随，但状态码仍是 3xx。此时绝不能把它当成成功往下解析，
+  // 否则「3xx 已拒绝」这条防线形同虚设。
+  if (response.status >= 300 && response.status < 400) {
+    return {
+      ok: false,
+      latencyMs,
+      message: '接口地址返回了重定向（3xx），出于安全考虑不会跟随跳转，请直接填写最终地址',
+    }
+  }
 
   // 先把响应体读成文本再尝试解析 JSON。
   // 有些网关出错时返回的是 HTML 错误页，直接 response.json() 会抛出一个

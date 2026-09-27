@@ -33,6 +33,22 @@ export const config = {
   // 缺少它地图会加载失败并报 INVALID_USER_SCODE。
   amapJsSecurityCode: process.env.AMAP_JS_SECURITY_CODE ?? '',
 
+  // 可信反向代理配置（见审查报告 A04 / 任务3）。
+  //
+  // 用途：限流需要一个可靠的客户端 IP。X-Forwarded-For 是客户端可以随意伪造的请求头，
+  // 只有在「请求确实经过我们信任的反向代理」时才可信。Express 的 trust proxy
+  // 就是告诉我们「第几层是可信代理」，由它来计算出真正的 req.ip。
+  //
+  // 取值语义（与 Express 一致）：
+  //   ''（默认） 不信任任何代理 → req.ip 取 socket 地址，客户端伪造 XFF 无效；
+  //   '1'         信任最近 1 层代理（如 nginx 在本机反代）；
+  //   'loopback'  信任回环地址来的代理；
+  //   IP/CIDR 列表（逗号分隔）精确指定可信代理网段。
+  //
+  // 默认留空是**故意**的：宁可让反代部署少一个真实 IP，也不能让默认配置
+  // 允许任何客户端伪造 XFF 绕过限流。反代部署时由运维显式设置。
+  trustedProxies: (process.env.TRUSTED_PROXIES ?? '').trim(),
+
   // ===== 以下为模型服务的全局默认值（可选）=====
   // 用途：用户还没在「个人设置」里填自己的 API Key 时，后端回退到这里，
   // 方便开发期先跑通 AI 排程。生产环境建议留空，强制每个用户配自己的 Key。

@@ -117,6 +117,21 @@ model Trip {
   /// 完成后前端可回看「AI 是怎么排的」：体裁判定、并行择优、换点、跨天传导等
   genDecisions String?
 
+  /// 当前正在运行的生成任务标识（UUID）。
+  /// 非 null 表示有一个生成会话「持有」这个行程；完成/失败/放弃时清空。
+  /// 用途（审查报告 A04 / 任务2、任务7）：
+  ///   1. 让并发控制覆盖「真实任务生命周期」而不只是 HTTP 请求——响应早已返回 202，
+  ///      真正占用资源的是后台跑的图；
+  ///   2. 只有持锁的那次运行才能清理/覆盖任务状态，避免旧任务继续写新任务的数据。
+  genRunId String?
+  /// 当前任务最近一次心跳时间。运行中的任务会周期性刷新它。
+  /// 与固定的 updatedAt 不同：心跳只由「持有 genRunId 的那次运行」写，
+  /// 因此能准确区分「任务在跑」与「用户改了行程导致 updatedAt 变化」。
+  /// 超过 genHeartbeatTtl 未刷新才判定为僵尸任务（任务7）。
+  genHeartbeatAt DateTime?
+  /// 当前任务的启动时间，用于展示与排查「这个任务跑了多久」
+  genRunStartedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -124,6 +139,7 @@ model Trip {
   tripDays TripDay[]
 
   @@index([userId])
+  @@index([status, genHeartbeatAt])
 }
 
 /// 行程中的每一天

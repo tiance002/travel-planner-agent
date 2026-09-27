@@ -19,6 +19,7 @@ import { type PlannedDay } from './scheduler'
 import { nightKindOfText, parseDayTypeBan, type DayType, type Intensity } from './spot-rules'
 import { type ToolContext } from './tools'
 import { buildAgentGraph, type AgentGraphContext, type ReviewAnswer } from './graph'
+import { HEARTBEAT_INTERVAL_MS, heartbeatRun, isRunOwner, releaseRun } from './run-lock'
 import type { TripBasics } from './prompt'
 
 /** 生成失败时抛出，携带给用户看的中文原因 */
@@ -57,10 +58,17 @@ export async function generateTripWithGraph(
      * 不传则退回环境变量 PARALLEL_CANDIDATES，再退回 1（不并行）。
      */
     parallelCandidates?: number
+    /**
+     * 本任务持有的运行锁 token（见 run-lock.ts / 任务2）。
+     * 由路由层 acquireRun 拿到后传入。传 null/不传表示不参与锁管理
+     * （仅供脚本/测试直接驱动图时使用），此时不做心跳与归属校验。
+     */
+    runId?: string | null
   } = {},
 ): Promise<void> {
   const startedAt = Date.now()
   const mode = options.mode ?? 'continue'
+  const runId = options.runId ?? null
   // review 模式 = 从头重排 + 逐天人工确认（V3）。
   // 语义上等价于 restart（清空旧安排）叠加 reviewMode（每排完一天暂停）。
   // 这样用户点「逐天确认生成」时，一定是从第 1 天开始、逐天过一遍，
@@ -69,89 +77,109 @@ export async function generateTripWithGraph(
   const effectiveMode: 'continue' | 'restart' = mode === 'restart' || reviewMode ? 'restart' : 'continue'
   const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
 
-  const trip = await prisma.trip.findUnique({ where: { id: tripId } })
-  if (!trip) throw new GraphGenerateError('行程不存在')
+  // 心跳定时器：只要任务活着就周期性续约，避免长时间运行被误判为僵尸（任务7）。
+  // 在 finally 里清除，保证任何退出路径都不留定时器。
+  const heartbeatTimer = runId ? startHeartbeat(tripId, runId, log) : null
+  // 是否因「等待人工裁决」而挂起。挂起时不释放锁（图还在 interrupt 上）。
+  let suspended = false
 
-  const credentials = await getCredentialsForUser(trip.userId)
-  if (!credentials) {
-    throw new GraphGenerateError('还没有配置模型 API Key，请先到「个人设置」里填写')
-  }
+  try {
+    const trip = await prisma.trip.findUnique({ where: { id: tripId } })
+    if (!trip) throw new GraphGenerateError('行程不存在')
 
-  const report = createReporter(tripId)
-  const recordDecision = createDecisionRecorder(tripId)
-  const registry = new Map<string, Poi>()
-
-  // 用户已选住宿时登记进表，模型才能算「住宿 → 第一站」的真实通勤
-  const stayInfo = await loadStayPoi(trip)
-  if (stayInfo) registry.set(stayInfo.poi.poiId, stayInfo.poi)
-
-  const toolContext: ToolContext = {
-    cityName: trip.cityName,
-    cityAdcode: trip.cityAdcode,
-    registry,
-    report: (text) => report(text),
-  }
-
-  const basics: TripBasics = {
-    cityName: trip.cityName,
-    cityAdcode: trip.cityAdcode,
-    startDate: formatDate(trip.startDate),
-    days: trip.days,
-    travelers: trip.travelers,
-    preferences: safeParseArray(trip.preferences),
-    extraNeeds: safeParseArray(trip.extraNeeds),
-    budgetAmount: trip.budgetAmount,
-    budgetScope: trip.budgetScope === 'total' ? 'total' : 'per_person',
-  }
-
-  const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
-
-  // 断点续跑：先恢复已落库的天，算出「下一个要排的天」与跨天传导状态
-  if (effectiveMode === 'restart') {
-    await prisma.tripDay.deleteMany({ where: { tripId } })
-    log('已清空原有安排，从头生成')
-  }
-
-  const existing = await prisma.tripDay.findMany({
-    where: { tripId },
-    orderBy: { dayIndex: 'asc' },
-    include: { items: { orderBy: { orderIndex: 'asc' } } },
-  })
-
-  const usedPoiIds: string[] = []
-  const previousPlaces: string[] = []
-  const usedNightKinds: string[] = []
-  for (const day of existing) {
-    for (const item of day.items) {
-      if (item.poiId) usedPoiIds.push(item.poiId)
-      previousPlaces.push(item.name)
-      const kind = nightKindOfText(item.name, item.tag)
-      if (kind && !usedNightKinds.includes(kind)) usedNightKinds.push(kind)
+    const credentials = await getCredentialsForUser(trip.userId)
+    if (!credentials) {
+      throw new GraphGenerateError('还没有配置模型 API Key，请先到「个人设置」里填写')
     }
-  }
 
-  const doneDays = new Set(existing.map((day) => day.dayIndex))
-  let startDay = 1
-  while (doneDays.has(startDay)) startDay += 1
+    const report = createReporter(tripId, runId)
+    const recordDecision = createDecisionRecorder(tripId)
+    const registry = new Map<string, Poi>()
 
-  // 上一天的天型强度（断点续跑时从已落库的最后一天恢复）
-  const lastExisting = existing.length > 0 ? existing[existing.length - 1] : null
-  let previousDayState: { dayType: string; intensity: string } | null = null
-  if (lastExisting && lastExisting.dayIndex === startDay - 1) {
-    previousDayState = {
-      dayType: (lastExisting.dayType as DayType) || 'normal',
-      intensity: (lastExisting.intensity as Intensity) || 'medium',
+    // 用户已选住宿时登记进表，模型才能算「住宿 → 第一站」的真实通勤
+    const stayInfo = await loadStayPoi(trip)
+    if (stayInfo) registry.set(stayInfo.poi.poiId, stayInfo.poi)
+
+    const toolContext: ToolContext = {
+      cityName: trip.cityName,
+      cityAdcode: trip.cityAdcode,
+      registry,
+      report: (text) => report(text),
     }
-  }
 
-  if (startDay > trip.days) {
-    log('所有天都已经排好，无需再生成')
-    await prisma.trip.update({
-      where: { id: tripId },
-      data: { status: 'ready', genProgress: null, genError: null },
+    const basics: TripBasics = {
+      cityName: trip.cityName,
+      cityAdcode: trip.cityAdcode,
+      startDate: formatDate(trip.startDate),
+      days: trip.days,
+      travelers: trip.travelers,
+      preferences: safeParseArray(trip.preferences),
+      extraNeeds: safeParseArray(trip.extraNeeds),
+      budgetAmount: trip.budgetAmount,
+      budgetScope: trip.budgetScope === 'total' ? 'total' : 'per_person',
+    }
+
+    const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
+
+    // 断点续跑：先恢复已落库的天，算出「下一个要排的天」与跨天传导状态
+    if (effectiveMode === 'restart') {
+      await prisma.tripDay.deleteMany({ where: { tripId } })
+      log('已清空原有安排，从头生成')
+    }
+
+    const existing = await prisma.tripDay.findMany({
+      where: { tripId },
+      orderBy: { dayIndex: 'asc' },
+      include: { items: { orderBy: { orderIndex: 'asc' } } },
     })
-    return
-  }
+
+    // 断点续跑的核心（见审查报告任务5）：按「实际落库的 dayIndex 集合」识别缺口，
+    // 而不是找「第一个空缺就往下排」。后者会在「缺第 2 天、但 3~5 天都已有」时，
+    // 从第 2 天开始把 3~5 天重新排一遍——把用户已确认的行程覆盖掉。
+    //
+    // 正确语义：只补真正缺失的那几天，已经存在的天**原样跳过、绝不重排**。
+    // 跨天去重与天型传导状态则从「所有已存在的天、按 dayIndex 顺序」重建，
+    // 让补出来的第 2 天与前后的语境一致。
+    const existingByDay = new Map(existing.map((day) => [day.dayIndex, day]))
+    const missingDays: number[] = []
+    for (let day = 1; day <= trip.days; day++) {
+      if (!existingByDay.has(day)) missingDays.push(day)
+    }
+
+    const usedPoiIds: string[] = []
+    const previousPlaces: string[] = []
+    const usedNightKinds: string[] = []
+    // 按 dayIndex 顺序遍历（existing 已按 asc 排序），逐天累积跨天状态。
+    // 这样「补第 2 天」时能看到第 1 天去过哪，而不是只看最后一天。
+    for (const day of existing) {
+      for (const item of day.items) {
+        if (item.poiId) usedPoiIds.push(item.poiId)
+        previousPlaces.push(item.name)
+        const kind = nightKindOfText(item.name, item.tag)
+        if (kind && !usedNightKinds.includes(kind)) usedNightKinds.push(kind)
+      }
+    }
+
+    // 第一天要排哪一天 = 最早缺失的那天。若没有缺失，则全部完成。
+    const firstMissing = missingDays[0]
+    const startDay = firstMissing ?? trip.days + 1
+
+    // 上一天的天型强度：从「紧邻待排日的上一天」恢复。
+    // 断点续跑时这个上一天一定存在（否则它自己就是缺失日），所以能读到正确的传导状态。
+    let previousDayState: { dayType: string; intensity: string } | null = null
+    const prevDay = existingByDay.get(startDay - 1)
+    if (prevDay) {
+      previousDayState = {
+        dayType: (prevDay.dayType as DayType) || 'normal',
+        intensity: (prevDay.intensity as Intensity) || 'medium',
+      }
+    }
+
+    if (startDay > trip.days) {
+      log('所有天都已经排好，无需再生成')
+      await finalizeIfComplete(tripId, trip.days, log)
+      return
+    }
 
   // 天气取一次，逐天分发
   const weatherByDate = new Map<string, WeatherCast>()
@@ -191,53 +219,69 @@ export async function generateTripWithGraph(
   const graph = buildAgentGraph(ctx, getCheckpointer())
   const config = { configurable: { thread_id: tripId } }
 
-  try {
-    // 图状态初值：从已落库的天恢复跨天去重与传导状态
-    const result = await graph.invoke(
-      {
-        dayIndex: startDay,
-        totalDays: trip.days,
-        usedPoiIds,
-        previousPlaces,
-        usedNightKinds,
-        previousDayState,
-        warnings: [],
-        finished: false,
-        pendingDaySummary: null,
-        dayRetryCount: 0,
-        dayError: null,
-        dayFeedback: null,
-        pendingDay: null,
-        pendingCandidates: null,
-      },
-      config,
-    )
+    try {
+      // 图状态初值：从已落库的天恢复跨天去重与传导状态
+      const result = await graph.invoke(
+        {
+          dayIndex: startDay,
+          totalDays: trip.days,
+          usedPoiIds,
+          previousPlaces,
+          usedNightKinds,
+          previousDayState,
+          warnings: [],
+          finished: false,
+          pendingDaySummary: null,
+          dayRetryCount: 0,
+          dayError: null,
+          dayFeedback: null,
+          pendingDay: null,
+          pendingCandidates: null,
+          // 已存在的天：planDay 遇到它们直接跳过，只补真正缺失的天（任务5）
+          gapDays: existing.map((day) => day.dayIndex),
+        },
+        config,
+      )
 
-    // review/choose 交互模式：图在 reviewDay 的 interrupt 处暂停返回，result 里带
-    // __interrupt__。这时不是完成、也不是失败，而是「等待用户裁决」——
-    // 把结构化载荷写进 genReview（前端渲染确认卡片用），status 保持 generating，
-    // 等用户调用 review-confirm 接口恢复。
-    const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
-    if (interrupts && interrupts.length > 0) {
-      await writeReviewInterrupt(tripId, interrupts[0], log)
-      return
+      // review/choose 交互模式：图在 reviewDay 的 interrupt 处暂停返回，result 里带
+      // __interrupt__。这时不是完成、也不是失败，而是「等待用户裁决」——
+      // 把结构化载荷写进 genReview（前端渲染确认卡片用），status 保持 generating，
+      // 等用户调用 review-confirm 接口恢复。
+      const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
+      if (interrupts && interrupts.length > 0) {
+        await writeReviewInterrupt(tripId, interrupts[0], log)
+        // 注意：等待用户裁决时**不释放锁**。图还挂在 interrupt 上，
+        // 状态还在 checkpoint 里；此时放锁会让第二个任务进来把它顶掉（任务2第5点）。
+        // 心跳定时器会继续为这个挂起的任务续约，所以它不会被误判成僵尸。
+        suspended = true
+        return
+      }
+
+      const totalItems = await prisma.tripItem.count({ where: { tripDay: { tripId } } })
+      log(
+        `图编排完成：${trip.days} 天 / ${totalItems} 个条目 / ` +
+          `总耗时 ${Math.round((Date.now() - startedAt) / 1000)} 秒`,
+      )
+      void result
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      // 只有锁还在自己手上时才写失败状态（任务7第2点）：
+      // 如果锁已经被别人接管，这次失败的运行不该去覆盖新任务的状态。
+      if (!runId || (await isRunOwner(tripId, runId))) {
+        await prisma.trip
+          .update({
+            where: { id: tripId },
+            data: { status: 'failed', genError: msg, genReview: null },
+          })
+          .catch(() => undefined)
+      }
+      throw new GraphGenerateError(msg)
     }
-
-    const totalItems = await prisma.tripItem.count({ where: { tripDay: { tripId } } })
-    log(
-      `图编排完成：${trip.days} 天 / ${totalItems} 个条目 / ` +
-        `总耗时 ${Math.round((Date.now() - startedAt) / 1000)} 秒`,
-    )
-    void result
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error)
-    await prisma.trip
-      .update({
-        where: { id: tripId },
-        data: { status: 'failed', genError: msg, genReview: null },
-      })
-      .catch(() => undefined)
-    throw new GraphGenerateError(msg)
+  } finally {
+    // 只有「非挂起」的正常退出才释放锁。挂起（等待人工裁决）时锁要继续持有。
+    // 正常完成、失败、异常退出三条路径都会走到这里，保证不会永久占用（任务2第5点）。
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    if (runId && !suspended) await releaseRun(tripId, runId)
   }
 }
 
@@ -271,6 +315,28 @@ async function writeReviewInterrupt(
 }
 
 /**
+ * 领取一次「人工裁决」的处理权（见审查报告任务6）。
+ *
+ * 为什么需要它：原来的流程是「读 status → 读 getState 判断有没有挂起 →
+ * invoke(resume)」，这三步之间没有任何原子性。用户快速双击「确认采用」，
+ * 两个请求会同时通过检查，然后各自从同一个 checkpoint 恢复一次图——
+ * 结果就是同一天被提交两次、后续天被重复生成。
+ *
+ * 这里用 genReview 字段本身当**原子令牌**：把它从「非 null」改成 null 这件事
+ * 只有一个请求能做成功（updateMany 的 WHERE 条件保证）。抢到的人才有资格 resume。
+ * 这与任务2的 runId 抢锁是同一种模式，只是令牌换了。
+ *
+ * 返回 true = 领到了处理权；false = 已被别的请求领走（重复点击）。
+ */
+async function claimReview(tripId: string): Promise<boolean> {
+  const result = await prisma.trip.updateMany({
+    where: { id: tripId, genReview: { not: null } },
+    data: { genReview: null },
+  })
+  return result.count > 0
+}
+
+/**
  * review 模式下的恢复：用户在「待确认」后点了「确认采用」。
  *
  * 用同一个 thread_id（= tripId）+ Command({resume}) 让图从 reviewDay 的
@@ -280,93 +346,100 @@ async function writeReviewInterrupt(
  */
 export async function resumeTripReview(
   tripId: string,
-  options: { answer?: ReviewAnswer; parallelCandidates?: number } = {},
+  options: { answer?: ReviewAnswer; parallelCandidates?: number; runId?: string | null } = {},
 ): Promise<void> {
   const log = (line: string) => console.log(`[生成·图 ${tripId}] ${line}`)
-
-  const trip = await prisma.trip.findUnique({ where: { id: tripId } })
-  if (!trip) throw new GraphGenerateError('行程不存在')
-
-  const credentials = await getCredentialsForUser(trip.userId)
-  if (!credentials) throw new GraphGenerateError('还没有配置模型 API Key')
-
-  const report = createReporter(tripId)
-  const recordDecision = createDecisionRecorder(tripId)
-  const registry = new Map<string, Poi>()
-
-  const stayInfo = await loadStayPoi(trip)
-  if (stayInfo) registry.set(stayInfo.poi.poiId, stayInfo.poi)
-
-  const toolContext: ToolContext = {
-    cityName: trip.cityName,
-    cityAdcode: trip.cityAdcode,
-    registry,
-    report: (text) => report(text),
-  }
-
-  const basics: TripBasics = {
-    cityName: trip.cityName,
-    cityAdcode: trip.cityAdcode,
-    startDate: formatDate(trip.startDate),
-    days: trip.days,
-    travelers: trip.travelers,
-    preferences: safeParseArray(trip.preferences),
-    extraNeeds: safeParseArray(trip.extraNeeds),
-    budgetAmount: trip.budgetAmount,
-    budgetScope: trip.budgetScope === 'total' ? 'total' : 'per_person',
-  }
-
-  const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
-
-  const weatherByDate = new Map<string, WeatherCast>()
-  try {
-    const weather = await getWeather(trip.cityAdcode)
-    for (const cast of weather?.casts ?? []) weatherByDate.set(cast.date, cast)
-  } catch {
-    log('天气获取失败，本次按天气未知处理')
-  }
-
-  const ctx: AgentGraphContext = {
-    tripId,
-    credentials,
-    registry,
-    toolContext,
-    basics,
-    ban,
-    anchor: stayInfo?.poi ?? null,
-    weatherByDate,
-    report,
-    log,
-    persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
-    maxToolRounds: MAX_DAY_TOOL_ROUNDS,
-    reviewMode: true,
-    // 恢复路径沿用与首次生成相同的并行配置
-    parallelCandidates: options.parallelCandidates ?? Number(process.env.PARALLEL_CANDIDATES ?? 1),
-    recordDecision,
-  }
-
-  const graph = buildAgentGraph(ctx, getCheckpointer())
-  const config = { configurable: { thread_id: tripId } }
-
-  // 先撤下待确认卡片：从这一刻起到下一次 interrupt 之间，前端不该再显示旧卡片。
-  // 不清的话存在竞态——用户驳回后立刻轮询，读到的还是旧载荷，会误以为没变化。
-  await prisma.trip
-    .update({ where: { id: tripId }, data: { genReview: null } })
-    .catch(() => undefined)
-
-  // 防重入：图当前若没有挂起的 interrupt（例如 planDay 正在按意见重排），
-  // 这次 resume 是竞态的重复点击，静默忽略——绝不能让 LangGraph 从上一个
-  // 检查点重跑节点（实测会连着重排好几次）。
-  const snapshot = await graph.getState(config)
-  const hasPendingInterrupt = (snapshot.tasks ?? []).some(
-    (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
-  )
-  if (!hasPendingInterrupt) {
-    log('收到裁决但当前没有等待裁决的任务（重复点击或正在重排），忽略')
-    return
-  }
+  const runId = options.runId ?? null
+  // 挂起的 review 任务仍然持有原来的 runId；恢复时沿用同一把锁，
+  // 只有这样「等待期间不放锁」才是自洽的：恢复的是同一个任务。
+  const heartbeatTimer = runId ? startHeartbeat(tripId, runId, log) : null
+  let suspended = false
 
   try {
+    const trip = await prisma.trip.findUnique({ where: { id: tripId } })
+    if (!trip) throw new GraphGenerateError('行程不存在')
+
+    const credentials = await getCredentialsForUser(trip.userId)
+    if (!credentials) throw new GraphGenerateError('还没有配置模型 API Key')
+
+    const report = createReporter(tripId, runId)
+    const recordDecision = createDecisionRecorder(tripId)
+    const registry = new Map<string, Poi>()
+
+    const stayInfo = await loadStayPoi(trip)
+    if (stayInfo) registry.set(stayInfo.poi.poiId, stayInfo.poi)
+
+    const toolContext: ToolContext = {
+      cityName: trip.cityName,
+      cityAdcode: trip.cityAdcode,
+      registry,
+      report: (text) => report(text),
+    }
+
+    const basics: TripBasics = {
+      cityName: trip.cityName,
+      cityAdcode: trip.cityAdcode,
+      startDate: formatDate(trip.startDate),
+      days: trip.days,
+      travelers: trip.travelers,
+      preferences: safeParseArray(trip.preferences),
+      extraNeeds: safeParseArray(trip.extraNeeds),
+      budgetAmount: trip.budgetAmount,
+      budgetScope: trip.budgetScope === 'total' ? 'total' : 'per_person',
+    }
+
+    const ban = parseDayTypeBan(safeParseArray(trip.extraNeeds))
+
+    const weatherByDate = new Map<string, WeatherCast>()
+    try {
+      const weather = await getWeather(trip.cityAdcode)
+      for (const cast of weather?.casts ?? []) weatherByDate.set(cast.date, cast)
+    } catch {
+      log('天气获取失败，本次按天气未知处理')
+    }
+
+    const ctx: AgentGraphContext = {
+      tripId,
+      credentials,
+      registry,
+      toolContext,
+      basics,
+      ban,
+      anchor: stayInfo?.poi ?? null,
+      weatherByDate,
+      report,
+      log,
+      persistDay: (day, date, weather) => persistDay(tripId, day, date, weather),
+      maxToolRounds: MAX_DAY_TOOL_ROUNDS,
+      reviewMode: true,
+      // 恢复路径沿用与首次生成相同的并行配置
+      parallelCandidates: options.parallelCandidates ?? Number(process.env.PARALLEL_CANDIDATES ?? 1),
+      recordDecision,
+    }
+
+    const graph = buildAgentGraph(ctx, getCheckpointer())
+    const config = { configurable: { thread_id: tripId } }
+
+    // 原子领取处理权（任务6）：抢不到说明这次是重复点击，直接忽略。
+    // 这一步同时承担了「撤下旧待确认卡片」的职责——领取成功即 genReview = null。
+    const claimed = await claimReview(tripId)
+    if (!claimed) {
+      log('收到裁决但待确认内容已被处理（重复点击），忽略')
+      return
+    }
+
+    // 防重入的补充：图当前若没有挂起的 interrupt（例如 planDay 正在按意见重排），
+    // 这次 resume 是竞态的重复点击，静默忽略——绝不能让 LangGraph 从上一个
+    // 检查点重跑节点（实测会连着重排好几次）。
+    const snapshot = await graph.getState(config)
+    const hasPendingInterrupt = (snapshot.tasks ?? []).some(
+      (t) => Array.isArray(t.interrupts) && t.interrupts.length > 0,
+    )
+    if (!hasPendingInterrupt) {
+      log('收到裁决但当前没有等待裁决的任务（重复点击或正在重排），忽略')
+      return
+    }
+
     // 用户的裁决（确认/挑选/驳回+意见）原样透传给图里的 reviewDay 节点。
     // 兼容：没带 answer 的旧调用按「确认采用」处理。
     const answer: ReviewAnswer = options.answer ?? { decision: 'approve' }
@@ -376,19 +449,26 @@ export async function resumeTripReview(
     const interrupts = (result as { __interrupt__?: unknown[] }).__interrupt__
     if (interrupts && interrupts.length > 0) {
       await writeReviewInterrupt(tripId, interrupts[0], log)
+      // 仍处于等待裁决状态：锁继续持有，心跳继续续约
+      suspended = true
       return
     }
 
     log('review 模式全部确认完毕')
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
-    await prisma.trip
-      .update({
-        where: { id: tripId },
-        data: { status: 'failed', genError: msg, genReview: null },
-      })
-      .catch(() => undefined)
+    if (!runId || (await isRunOwner(tripId, runId))) {
+      await prisma.trip
+        .update({
+          where: { id: tripId },
+          data: { status: 'failed', genError: msg, genReview: null },
+        })
+        .catch(() => undefined)
+    }
     throw new GraphGenerateError(msg)
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    if (runId && !suspended) await releaseRun(tripId, runId)
   }
 }
 
@@ -396,7 +476,76 @@ export async function resumeTripReview(
 // 复用自原 index.ts 的辅助逻辑（进度节流、落库、住宿还原、日期工具）
 // ---------------------------------------------------------------------------
 
-function createReporter(tripId: string) {
+/**
+ * 启动心跳定时器（任务7）。
+ *
+ * 它让「任务在跑」这件事对数据库可见：只要进程还活着，genHeartbeatAt 就会每
+ * HEARTBEAT_INTERVAL_MS 刷新一次。判定僵尸不再看「updatedAt 多久没变」——
+ * 那是错的：用户改个标题、任务正常跑 20 分钟、等待人工裁决，updatedAt 都可能不变，
+ * 但它们都不是崩溃。只有心跳停了才是。
+ *
+ * 返回定时器句柄，调用方负责在 finally 里 clearInterval。
+ */
+function startHeartbeat(tripId: string, runId: string, log: (line: string) => void): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    void heartbeatRun(tripId, runId).then((stillOwner) => {
+      // 心跳写不进去 = 锁已经不在自己手上（被判僵尸后别人接管了）。
+      // 这时不能自杀式退出（图还在跑），但要留下日志便于排查；
+      // 后续的写入会由 isRunOwner 守卫拦住（见 persistDay 之外的失败分支）。
+      if (!stillOwner) log('心跳续约失败：本任务的运行锁已被其他任务接管')
+    })
+  }, HEARTBEAT_INTERVAL_MS)
+  // 不要因为这个定时器让进程无法退出
+  timer.unref?.()
+  return timer
+}
+
+/**
+ * 收尾核对：所有预期天都已落库时，把状态推进到 ready（任务5第6~7点）。
+ *
+ * 用于「无需生成、直接返回」的入口（例如续跑时发现没有缺失天）。
+ * 与 finalizeNode 同源：都以「数据库里实际存在的 dayIndex 集合」为准，
+ * 而不是任何计数器，避免出现「计数器说完成、库里其实缺一天」。
+ */
+async function finalizeIfComplete(
+  tripId: string,
+  totalDays: number,
+  log: (line: string) => void,
+): Promise<void> {
+  const persisted = await prisma.tripDay.findMany({
+    where: { tripId },
+    select: { dayIndex: true },
+  })
+  const persistedDays = new Set(persisted.map((day) => day.dayIndex))
+  const missing: number[] = []
+  for (let day = 1; day <= totalDays; day++) {
+    if (!persistedDays.has(day)) missing.push(day)
+  }
+  if (missing.length === 0) {
+    await prisma.trip.update({
+      where: { id: tripId },
+      data: { status: 'ready', genProgress: null, genError: null, genReview: null },
+    })
+    log('核对通过：全部天均已落库，状态置为 ready')
+    return
+  }
+  const summary = `已完成 ${persistedDays.size}/${totalDays} 天，第 ${missing.join('、')} 天未能生成`
+  await prisma.trip.update({
+    where: { id: tripId },
+    data: { status: 'partial', genProgress: null, genError: summary, genReview: null },
+  })
+  log(`核对未通过：${summary}`)
+}
+
+/**
+ * 进度上报器（节流写库）。
+ *
+ * 任务8第7点「异步进度写入不得覆盖较新的状态」：这里给写入加上 runId 归属条件——
+ * 只有当前持锁的那次运行才能写 genProgress。否则一个已经失锁的旧任务，
+ * 其滞后的进度写入会把新任务的进度覆盖掉。
+ * runId 为 null（脚本/测试直连）时不做归属校验。
+ */
+function createReporter(tripId: string, runId: string | null) {
   let lastWriteAt = 0
   let lastText = ''
   return (text: string, options: { force?: boolean } = {}) => {
@@ -405,9 +554,15 @@ function createReporter(tripId: string) {
     const now = Date.now()
     if (!options.force && now - lastWriteAt < 800) return
     lastWriteAt = now
-    void prisma.trip
-      .update({ where: { id: tripId }, data: { genProgress: text } })
-      .catch(() => undefined)
+    if (runId) {
+      void prisma.trip
+        .updateMany({ where: { id: tripId, genRunId: runId }, data: { genProgress: text } })
+        .catch(() => undefined)
+    } else {
+      void prisma.trip
+        .update({ where: { id: tripId }, data: { genProgress: text } })
+        .catch(() => undefined)
+    }
   }
 }
 

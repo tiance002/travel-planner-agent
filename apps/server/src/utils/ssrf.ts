@@ -13,9 +13,17 @@
 //      再 302 到内网」绕过检查；
 //   4. 对地址里的主机名做同样的检查——HTTP 层的校验独立于 DNS，两者都要过。
 //
-// 注意：这里不追求「完整覆盖所有 DNS 重绑定场景」（那需要自定义 agent 在连接层
-// 校验实际对端 IP）。作为上线阻断级别的第一道防线，本模块已经把报告点名的
-// 风险路径全部堵住；更理想的做法是让模型请求走受控的 egress proxy。
+// 注意（残余风险，务必如实对待）：
+//   本模块**不能**彻底解决 DNS 重绑定（DNS rebinding）。攻击者可以让域名第一次解析
+//   到公网地址（通过这里的校验），随后把 TTL 改到 0、在真正发起请求的那一刻解析到
+//   127.0.0.1。要根治必须在「建立 TCP 连接」的那一层校验真实对端 IP
+//   （自定义 http.Agent / undici dispatcher 做 lookup 劫持与二次校验），
+//   或让模型请求统一走受控的 egress 代理。
+//
+//   本模块目前的定位是**上线阻断级别的第一道防线**：把报告点名的风险路径
+//   （明文内网地址、云 metadata、自动重定向绕过）全部堵死，
+//   它对「静态的恶意配置」是完备的，对「动态 DNS」只是显著抬高成本。
+//   因此不得对外宣称 SSRF 已获得完整生产级防护。
 
 import { isIP } from 'node:net'
 import { lookup } from 'node:dns/promises'
@@ -77,6 +85,17 @@ function isBlockedIpv6(ip: string): boolean {
   const mapped = /^::(?:ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(normalized)
   if (mapped) return isBlockedIpv4(mapped[1])
 
+  // 同一类地址的**十六进制压缩写法**：::ffff:7f00:1（= ::ffff:127.0.0.1）。
+  // WHATWG URL 会把 `http://[::ffff:127.0.0.1]/` 规范化成这种形式，
+  // 所以必须能识别——否则 IPv4 映射的环回/metadata 会从缝隙里漏过去。
+  const hexMapped = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(normalized)
+  if (hexMapped) {
+    const high = parseInt(hexMapped[1], 16)
+    const low = parseInt(hexMapped[2], 16)
+    const dotted = `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`
+    return isBlockedIpv4(dotted)
+  }
+
   if (normalized === '::' || normalized === '::1') return true // 未指定 / 环回
   if (normalized.startsWith('fe8') || normalized.startsWith('fe9')) return true // fe80::/10
   if (normalized.startsWith('fea') || normalized.startsWith('feb')) return true
@@ -128,13 +147,22 @@ export async function assertSafeModelBaseUrl(
 
   const hostname = url.hostname
   if (!hostname) return { ok: false, reason: '接口地址缺少主机名' }
-  if (isLocalHostname(hostname)) {
+
+  // URL 对 IPv6 字面量会保留方括号（如 `[::ffff:7f00:1]`），
+  // 而 isIP() 不认识方括号形式——不剥掉就会把「带括号的 IPv6」误判成域名，
+  // 直接跳到 DNS 分支（DNS 也解析不出来），从而放过 `http://[::ffff:127.0.0.1]/`
+  // 这类 IPv4 映射的环回地址。这里先剥括号再判定。
+  const literal = hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname
+
+  if (isLocalHostname(hostname) || isLocalHostname(literal)) {
     return { ok: false, reason: '接口地址不能指向本机或内网域名' }
   }
 
   // 主机名本身就是 IP 字面量：直接判定，不做 DNS
-  if (isIP(hostname)) {
-    if (isBlockedIp(hostname)) {
+  if (isIP(literal)) {
+    if (isBlockedIp(literal)) {
       return { ok: false, reason: '接口地址指向内网或保留地址，已被拒绝' }
     }
     return { ok: true }
