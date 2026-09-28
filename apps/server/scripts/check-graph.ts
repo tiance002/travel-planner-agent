@@ -133,7 +133,7 @@ check('线程 2 的 resume 值正确（互不串味）', iso2.seen.includes('a:t
 
 console.log('\n--- SQLite checkpointer：跨实例持久化恢复 ---')
 
-const dbPath = path.resolve(import.meta.dirname, '../.debug/_check-graph.sqlite')
+const dbPath = path.resolve(process.env.TRAVEL_TEST_DIR ?? path.resolve(import.meta.dirname, '../.debug'), '_check-graph.sqlite')
 try {
   fs.rmSync(dbPath, { force: true })
   fs.rmSync(`${dbPath}-wal`, { force: true })

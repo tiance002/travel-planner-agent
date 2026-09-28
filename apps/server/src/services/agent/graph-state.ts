@@ -54,7 +54,7 @@ export const AgentGraphState = new StateSchema({
   previousDayState: DayStateRefSchema.nullable(),
   /** 累积的规则修正提示。数组追加 */
   warnings: new ReducedValue(z.array(z.string()), {
-    reducer: (a, b) => [...a, ...b],
+    reducer: (a, b) => Array.from(new Set([...a, ...b].map(w => w.trim()).filter(Boolean))),
   }),
   /** 是否已全部排完。标量，覆盖式 */
   finished: z.boolean(),

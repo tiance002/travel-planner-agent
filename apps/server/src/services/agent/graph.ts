@@ -33,6 +33,7 @@
 
 import { END, START, StateGraph, interrupt, type BaseCheckpointSaver, type ConditionalEdgeRouter, type GraphNode } from '@langchain/langgraph'
 import { prisma } from '../../db'
+import { updateOwnedTrip, RunLostError } from './run-lock'
 import { planRoute, type Poi } from '../amap'
 import { type ModelCredentials } from '../llm'
 import { reaskForJson, runToolLoop, type ChatMessage } from './model-client'
@@ -62,6 +63,7 @@ import {
 import { runTool, TOOL_DEFINITIONS, type ToolContext } from './tools'
 import { AgentGraphState, type AgentState } from './graph-state'
 import type { WeatherCast } from '../amap'
+export class DayCommitError extends Error {}
 
 // ---------------------------------------------------------------------------
 // 外部上下文：不可序列化、或一次生成全程不变的东西都放这里，不进图状态
@@ -76,6 +78,10 @@ import type { WeatherCast } from '../amap'
  */
 export interface AgentGraphContext {
   tripId: string
+  runId?: string
+  assertOwner?: () => Promise<void>
+  optimizeCommute?: typeof optimizeCommute
+  estimateTransitTotal?: typeof estimateTransitTotal
   credentials: ModelCredentials
   /** poiId → POI。只有进过这张表的地点才允许被行程引用（坐标唯一可信来源） */
   registry: Map<string, Poi>
@@ -92,7 +98,14 @@ export interface AgentGraphContext {
   report: (text: string, options?: { force?: boolean }) => void
   log: (line: string) => void
   /** 落库单天 */
-  persistDay: (day: PlannedDay, date: Date, weather: WeatherCast | null) => Promise<void>
+  persistDay: (day: PlannedDay, date: Date, weather: WeatherCast | null, progress?: { warnings: string[]; totalDays: number }) => Promise<void>
+  /**
+   * Durable model-result handoff used by automatic generation.  The graph
+   * checkpoint also contains `pendingDay`, while this DB copy lets a fresh
+   * runtime finish the commit after a transaction failure without calling the
+   * model again.
+   */
+  persistPendingDay?: (day: PlannedDay, warnings: string[], totalDays: number) => Promise<void>
   /** 单天工具循环的轮次上限 */
   maxToolRounds: number
   /**
@@ -150,6 +163,7 @@ async function resolvePlanJsonWithRetry(
   try {
     return parsePlanJson(result.content)
   } catch (error) {
+    await ctx.assertOwner?.()
     const reason = error instanceof Error ? error.message : String(error)
     const truncated =
       (error instanceof PlanParseError && error.truncated) || result.finishReason === 'length'
@@ -347,8 +361,22 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   /** 本会话是否为交互式（需要 interrupt 问用户）：逐天确认或并行择优任一开启 */
   const interactive = ctx.reviewMode || ctx.parallelCandidates > 1
   // 依赖注入：默认用真实实现，测试时由 ctx 传入假实现（任务9）
-  const runToolLoopImpl = ctx.chatClient ?? runToolLoop
-  const runToolImpl = ctx.toolRunner ?? runTool
+  const runToolLoopImpl: typeof runToolLoop = async args => {
+    await ctx.assertOwner?.()
+    const result = await (ctx.chatClient ?? runToolLoop)(args)
+    await ctx.assertOwner?.()
+    return result
+  }
+  const runToolImpl: typeof runTool = async (...args) => {
+    await ctx.assertOwner?.()
+    const result = await (ctx.toolRunner ?? runTool)(...args)
+    await ctx.assertOwner?.()
+    return result
+  }
+  const updateTrip = async (data: import('../../generated/prisma/client').Prisma.TripUpdateManyMutationInput) => {
+    if (ctx.runId) await updateOwnedTrip(ctx.tripId, ctx.runId, data)
+    else await prisma.trip.updateMany({ where: { id: ctx.tripId }, data }) // direct graph-only checks
+  }
 
   // ---- 节点：锚点 ----------------------------------------------------------
   // 用户没选住宿时，让模型挑一个中心区域当锚点。
@@ -379,15 +407,12 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         `住宿锚点选在「${anchor.poi.name}」${anchor.reason ? `：${anchor.reason}` : ''}`,
       )
 
-      await prisma.trip.update({
-        where: { id: ctx.tripId },
-        data: {
+      await updateTrip({
           stayResolved: true,
           stayPoiId: anchor.poi.poiId,
           stayName: anchor.poi.name,
           stayLng: anchor.poi.lng,
           stayLat: anchor.poi.lat,
-        },
       })
     }
     return {}
@@ -401,7 +426,6 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
     const dateKey = addDays(ctx.basics.startDate, dayIndex - 1)
     const cast = ctx.weatherByDate.get(dateKey) ?? null
 
-    await ctx.persistDay(day, new Date(dateKey), cast)
 
     // 跨天累积 warnings（见审查报告任务8 第4~6点）。
     //
@@ -410,6 +434,16 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
     // 只写 `warnings`，等于每提交一天就把前面几天的提示覆盖掉——
     // 用户最后只看到最后一天的问题，前面被自动修正过的异常全丢了。
     const accumulated = dedupeWarnings([...state.warnings, ...warnings])
+    try {
+      // Automatic mode journals before this node.  Interactive approve/choose
+      // reaches commitDay only after the user's selection, so journal that
+      // exact selected day before the transactional write as well.
+      if (interactive) await ctx.persistPendingDay?.(day, accumulated, state.totalDays)
+      await ctx.persistDay(day, new Date(dateKey), cast, { warnings: accumulated, totalDays: state.totalDays })
+    } catch (error) {
+      // 已生成内容提交失败不能回模型重试；整体停止，由事实落库/安全补缺处理。
+      throw new DayCommitError(error instanceof Error ? error.message : String(error))
+    }
 
     // 跨天传导状态：这一天的地点进入去重清单，天型强度流向下一天
     const newPoiIds: string[] = []
@@ -427,16 +461,13 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       `第 ${dayIndex} 天体裁判定为「${day.dayType}」（强度 ${day.intensity}），安排 ${day.items.length} 个地点`,
     )
 
-    await prisma.trip.update({
-      where: { id: ctx.tripId },
-      data: {
+    if (!ctx.runId) await updateTrip({
         genDayIndex: dayIndex,
         genProgress: `第 ${dayIndex}/${state.totalDays} 天已完成`,
         genReview: null, // 待确认卡片已裁决，撤下
         // 累积的规则修正提示随天推进逐步落库（报告 A09）：万一行程在中途失败，
         // 已经产生的提示也不会丢——它们是用户判断「AI 排得靠不靠谱」的唯一线索。
-        genWarnings: accumulated.length > 0 ? JSON.stringify(accumulated.slice(-50)) : null,
-      },
+        genWarnings: accumulated.length > 0 ? JSON.stringify(accumulated) : null,
     })
 
     return {
@@ -466,14 +497,21 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   // 交互模式：只挂起（pendingDay / pendingCandidates），等用户裁决后由
   // reviewDay 提交；驳回时把意见写进 dayFeedback，图回到本节点重排。
   const planDayNode: GraphNode<typeof AgentGraphState> = async (state) => {
+    await ctx.assertOwner?.()
     const dayIndex = state.dayIndex
+
+    // A fully persisted trip starts the graph at days + 1.  Keep the graph
+    // invocation on the finalize path without asking the model for a phantom
+    // extra day (the previous implementation did exactly that).
+    if (dayIndex > state.totalDays) return {}
 
     // 断点续跑：这一天已经存在、不需要重排（见审查报告任务5）。
     // 直接跳过——不调模型、不落库、不消耗额度，只把游标推进，
     // 让后面真正缺失的天继续排队。这是「补中间缺失日不覆盖后续已有日」的关键。
     if (state.gapDays.includes(dayIndex)) {
       ctx.log(`第 ${dayIndex} 天已存在，跳过（断点续跑只补缺失的天）`)
-      return { dayIndex: dayIndex + 1 }
+      const day = await prisma.tripDay.findUnique({ where: { tripId_dayIndex: { tripId: ctx.tripId, dayIndex } } })
+      return { dayIndex: dayIndex + 1, previousDayState: day ? { dayType: day.dayType, intensity: day.intensity } : state.previousDayState }
     }
 
     try {
@@ -626,7 +664,8 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
       // ④ 通勤体检（含住处往返）。每个要展示给用户的候选都要体检——
       // 用户看到的就是最终会落库的版本，不能展示一套、提交另一套。
       for (const cand of generated) {
-        const commuteWarnings = await optimizeCommute(
+        await ctx.assertOwner?.()
+        const commuteWarnings = await (ctx.optimizeCommute ?? optimizeCommute)(
           [cand.day],
           ctx.registry,
           (text) => ctx.report(text),
@@ -636,13 +675,17 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
           new Set(state.usedNightKinds as NightKind[]),
         )
         cand.warnings = [...cand.warnings, ...commuteWarnings]
+        await ctx.assertOwner?.()
       }
 
       // ⑤ 按打分排序。全自动模式取第一；交互模式取前两套给用户挑
       generated.sort((a, b) => scoreCandidate(b.day) - scoreCandidate(a.day))
 
       if (!interactive) {
-        // 全自动：直接提交第一套（即原行为）
+        // Save the model result as a checkpointable pending value before the
+        // transactional commit.  The following reviewDay node performs the
+        // commit; if it fails, a retry can consume this value without another
+        // model call.
         const chosen = generated[0]
         ctx.log(
           `第 ${dayIndex} 天体裁：${chosen.day.dayType}（强度 ${chosen.day.intensity}）` +
@@ -653,8 +696,19 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
             `第 ${dayIndex} 天并行生成 ${generated.length} 套方案，自动选用评分最高的一套`,
           )
         }
-        const deltas = await commitDay(state, chosen.day, chosen.warnings)
-        return deltas
+        const accumulatedWarnings = dedupeWarnings([...state.warnings, ...chosen.warnings])
+        await ctx.persistPendingDay?.(chosen.day, accumulatedWarnings, state.totalDays)
+        return {
+          pendingDay: {
+            day: chosen.day,
+            warnings: accumulatedWarnings,
+            summary: chosen.day.summary || `${chosen.day.items.length} 个地点（${chosen.day.dayType}）`,
+          },
+          pendingCandidates: null,
+          dayFeedback: null,
+          dayError: null,
+          dayRetryCount: 0,
+        }
       }
 
       if (candidateCount > 1) {
@@ -669,7 +723,9 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
           // 逐案顺序查询（transit 接口较重，且高德对并发敏感）
           const transitTotals: (number | null)[] = []
           for (const cand of shown) {
-            transitTotals.push(await estimateTransitTotal(cand.day, anchor, ctx.basics.cityAdcode))
+            await ctx.assertOwner?.()
+            transitTotals.push(await (ctx.estimateTransitTotal ?? estimateTransitTotal)(cand.day, anchor, ctx.basics.cityAdcode))
+            await ctx.assertOwner?.()
           }
           const pendingCandidates = shown.map((cand, i) => {
             const mine = statsOf(cand.day)
@@ -719,6 +775,8 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         dayRetryCount: 0,
       }
     } catch (error) {
+      if (error instanceof RunLostError || error instanceof DayCommitError) throw error
+      await ctx.assertOwner?.()
       // 回退纠错：把失败记下来，交给条件边决定是否重试。
       const msg = error instanceof Error ? error.message : String(error)
       const nextRetry = state.dayRetryCount + 1
@@ -752,7 +810,15 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   //   · 双方案（并行择优）：展示 A/B 的优缺点与评分/通勤数据，用户挑一个或驳回
   // 驳回 = dayFeedback 写进状态 → 条件边回到 planDay 按意见重排同一天。
   const reviewDayNode: GraphNode<typeof AgentGraphState> = async (state) => {
-    if (!interactive) return {}
+    await ctx.assertOwner?.()
+    if (!interactive) {
+      const pending = state.pendingDay as
+        | { day: PlannedDay; warnings: string[]; summary: string }
+        | null
+      if (!pending) return {}
+      const deltas = await commitDay(state, pending.day, pending.warnings)
+      return { ...deltas, pendingDay: null, pendingCandidates: null }
+    }
 
     const dayIndex = state.dayIndex
 
@@ -853,6 +919,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
         }
       }
 
+      if (answer?.decision !== 'approve') throw new Error('单方案只接受 approve 或 reject')
       ctx.log(`第 ${dayIndex} 天用户确认采用`)
       const deltas = await commitDay(state, pending.day, pending.warnings)
       return { ...deltas, pendingDay: null, pendingCandidates: null }
@@ -873,6 +940,7 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
   // 回查数据库而不是依赖图内计数，是因为「跳过」分支并不落库，
   // 只有库里的实际行数才是真相。
   const finalizeNode: GraphNode<typeof AgentGraphState> = async (state) => {
+    await ctx.assertOwner?.()
     const persisted = await prisma.tripDay.findMany({
       where: { tripId: ctx.tripId },
       orderBy: { dayIndex: 'asc' },
@@ -886,37 +954,35 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
 
     const warnings = dedupeWarnings(state.warnings)
 
+    // Missing-day text is progress metadata (`genError`), not a scheduler
+    // warning.  Keeping it out of genWarnings means a later continue run can
+    // clear the derived gap message without deleting real rule corrections.
+    const finalWarnings = dedupeWarnings(warnings)
+
     if (missingDays.length === 0) {
-      await prisma.trip.update({
-        where: { id: ctx.tripId },
-        data: {
+      await updateTrip({
           status: 'ready',
           genProgress: null,
           genError: null,
           genReview: null,
-          genWarnings: warnings.length > 0 ? JSON.stringify(warnings.slice(-50)) : null,
-        },
+          genWarnings: finalWarnings.length > 0 ? JSON.stringify(finalWarnings) : null,
       })
       ctx.log('全部完成')
-      return { finished: true }
+      return { finished: true, warnings: finalWarnings }
     }
 
     // 存在缺失天：标记 partial，而不是假装成功
     const summary = `已完成 ${persistedDays.size}/${state.totalDays} 天，第 ${missingDays.join('、')} 天未能生成`
     ctx.log(summary)
     ctx.recordDecision(`行程部分完成：${summary}`)
-    await prisma.trip.update({
-      where: { id: ctx.tripId },
-      data: {
+    await updateTrip({
         status: 'partial',
         genProgress: null,
         genError: summary,
         genReview: null,
-        genWarnings:
-          JSON.stringify([...warnings, `缺失的天：${missingDays.join('、')}`].slice(-50)),
-      },
+        genWarnings: finalWarnings.length > 0 ? JSON.stringify(finalWarnings) : null,
     })
-    return { finished: true }
+    return { finished: true, warnings: finalWarnings }
   }
 
   // ---- 条件边 --------------------------------------------------------------
@@ -937,12 +1003,19 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
     return state.dayIndex <= state.totalDays ? 'planDay' : 'finalize'
   }
 
+  const startRoute: ConditionalEdgeRouter<{
+    InputSchema: typeof AgentGraphState
+    Nodes: 'resolveAnchor' | 'finalize'
+  }> = (state) => state.dayIndex > state.totalDays ? 'finalize' : 'resolveAnchor'
+
   return new StateGraph(AgentGraphState)
     .addNode('resolveAnchor', resolveAnchorNode)
     .addNode('planDay', planDayNode)
     .addNode('reviewDay', reviewDayNode)
     .addNode('finalize', finalizeNode)
-    .addEdge(START, 'resolveAnchor')
+    // A complete itinerary starts at finalize.  This avoids even resolving
+    // the stay (which can call a model) when continue has no missing day.
+    .addConditionalEdges(START, startRoute, ['resolveAnchor', 'finalize'])
     .addEdge('resolveAnchor', 'planDay')
     // planDay → reviewDay → 条件边：交互模式会 interrupt，全自动模式透传
     .addEdge('planDay', 'reviewDay')

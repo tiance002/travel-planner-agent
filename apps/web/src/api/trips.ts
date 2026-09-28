@@ -58,6 +58,14 @@ export interface TripDayData {
   items: TripItemData[]
 }
 
+/** 生成运行阶段；commit 阶段表示内容已生成但持久化边界需要重试。 */
+export type GenerationRunPhase =
+  | 'running'
+  | 'waiting'
+  | 'recovery'
+  | 'commit_pending'
+  | null
+
 /** 行程完整详情 */
 export interface TripDetailData {
   id: string
@@ -80,15 +88,136 @@ export interface TripDetailData {
   genProgress: string | null
   genDayIndex: number | null
   genError: string | null
+  /** 生成运行阶段：running 执行中、waiting 等待裁决、recovery 需要人工取消后补缺 */
+  genRunPhase: GenerationRunPhase
+  /** 当前待裁决卡片的不可复用标识，提交裁决时必须原样带回 */
+  genReviewId: string | null
+  /** 当前待裁决内容（JSON 字符串），刷新后仍可恢复操作 */
+  genReview: string | null
+  /** 生成运行配置。前端只展示状态，不用客户端值覆盖服务端配置。 */
+  genRunConfig: string | null
   /** 生成过程中自动修正的规则提示（通勤超时换点、天型降档等），后端已去重 */
   genWarnings?: string[]
+  /** 服务端按真实落库日期计算的完成数 */
+  completedDayCount: number
+  /** 服务端按 1..days 计算出的缺失日期索引 */
+  missingDayIndexes: number[]
   tripDays: TripDayData[]
+}
+
+/** 图版人工裁决卡片上的候选方案（来自服务端已验证的数据） */
+export interface ReviewCandidate {
+  label: 'A' | 'B'
+  summary: string
+  ratingAvg: number
+  commuteMinutes: number | null
+  transitMinutes: number | null
+  spotCount: number
+  pros: string[]
+  cons: string[]
+}
+
+/** 服务端 interrupt 持久化到 genReview 的展示载荷 */
+export interface GenerationReviewRequest {
+  kind: 'confirm' | 'choose'
+  dayIndex: number
+  totalDays: number
+  summary?: string
+  candidates?: ReviewCandidate[]
+}
+
+function isReviewCandidate(value: unknown): value is ReviewCandidate {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<ReviewCandidate>
+  return (
+    (candidate.label === 'A' || candidate.label === 'B') &&
+    typeof candidate.summary === 'string' &&
+    typeof candidate.ratingAvg === 'number' &&
+    (candidate.commuteMinutes === null || typeof candidate.commuteMinutes === 'number') &&
+    (candidate.transitMinutes === null || typeof candidate.transitMinutes === 'number') &&
+    typeof candidate.spotCount === 'number' &&
+    Array.isArray(candidate.pros) &&
+    candidate.pros.every((item) => typeof item === 'string') &&
+    Array.isArray(candidate.cons) &&
+    candidate.cons.every((item) => typeof item === 'string')
+  )
+}
+
+/**
+ * 解析服务端待裁决载荷。
+ *
+ * genReview 是持久化 JSON，可能来自旧数据或异常中断；不满足最小结构时
+ * 直接按「没有可安全操作的卡片」处理，避免让用户点击一个不能被服务端接受的动作。
+ */
+export function parseGenerationReview(value: string | null | undefined): GenerationReviewRequest | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as Partial<GenerationReviewRequest>
+    if (
+      (parsed.kind !== 'confirm' && parsed.kind !== 'choose') ||
+      !Number.isInteger(parsed.dayIndex) ||
+      !Number.isInteger(parsed.totalDays)
+    ) {
+      return null
+    }
+    if (
+      parsed.kind === 'choose' &&
+      (!Array.isArray(parsed.candidates) ||
+        parsed.candidates.length !== 2 ||
+        !parsed.candidates.every((candidate) => isReviewCandidate(candidate)))
+    ) {
+      return null
+    }
+    return parsed as GenerationReviewRequest
+  } catch {
+    return null
+  }
+}
+
+/** 只接受合法范围内的服务端派生完成数；旧响应回退到真实日期集合。 */
+export function getCompletedDayCount(trip: {
+  days: number
+  completedDayCount?: number | null
+  tripDays: Array<Pick<TripDayData, 'dayIndex'>>
+}): number {
+  if (typeof trip.completedDayCount === 'number' && Number.isInteger(trip.completedDayCount)) {
+    return Math.max(0, Math.min(trip.days, trip.completedDayCount))
+  }
+  return new Set(trip.tripDays.map((day) => day.dayIndex).filter((index) => index >= 1 && index <= trip.days)).size
+}
+
+/** 取服务端缺失日期；旧响应按 1..days 与真实落库日期集合回退。 */
+export function getMissingDayIndexes(
+  trip: {
+    days: number
+    missingDayIndexes?: number[] | null
+    tripDays: Array<Pick<TripDayData, 'dayIndex'>>
+  },
+): number[] {
+  if (Array.isArray(trip.missingDayIndexes)) {
+    return Array.from(
+      new Set(trip.missingDayIndexes.filter((index) => Number.isInteger(index) && index >= 1 && index <= trip.days)),
+    ).sort((a, b) => a - b)
+  }
+  const existing = new Set(trip.tripDays.map((day) => day.dayIndex))
+  return Array.from({ length: trip.days }, (_, index) => index + 1).filter((index) => !existing.has(index))
 }
 
 /** 获取行程详情（含每日条目） */
 export async function getTrip(id: string): Promise<TripDetailData> {
   const { data } = await api.get<{ trip: TripDetailData }>(`/trips/${id}`)
   return data.trip
+}
+
+/** 取消等待确认/人工恢复阶段的任务，保留已落库日期与打卡数据。 */
+export async function cancelGeneration(tripId: string): Promise<void> {
+  await api.post(`/trips/${tripId}/cancel-generation`)
+}
+
+/** 从已有行程复制基础配置为新草稿，供安全的重新规划使用。 */
+export async function createReplanDraft(tripId: string): Promise<string> {
+  const { data } = await api.post<{ trip: { id: string } }>(`/trips/${tripId}/replan-copy`)
+  return data.trip.id
 }
 
 /** 到点打卡 */

@@ -20,6 +20,10 @@
     "check:ssrf": "tsx scripts/check-ssrf.ts",
     "check:runlock": "tsx scripts/check-runlock.ts",
     "check:agent": "tsx scripts/check-agent.ts",
+    "check:proxy": "tsx scripts/check-proxy.ts",
+    "check:lifecycle": "tsx scripts/check-lifecycle.ts",
+    "check:migration": "tsx scripts/check-migration.ts",
+    "check:replan": "tsx scripts/check-replan.ts",
     "test": "npm run check:ssrf && npm run check:runlock && npm run check:agent && npm run check:parser && npm run check:scheduler && npm run check:graph"
   },
   "dependencies": {

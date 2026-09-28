@@ -1,0 +1,13 @@
+# Findings
+- HEAD 51556094d283f250a6832898cc00ff7fed5143f7 main; original untracked .serena/ preserved.
+- Review stops timer but leaves expiring token. Duplicate resume releases lock even without claim. User pre-count races across trips. Unconditional graph/route writes allow stale commits.
+- Baseline typecheck passes; ssrf51 runlock17 agent19 parser14 scheduler74 pass; graph stops on native ABI.
+- UI preference warm white/natural colors/clear cards, planning only visual redesign requested.
+- `resumeTripReview` previously left `genReview` while phase `running`; a stale process could neither be reclaimed nor cancelled. The lifecycle now uses `reviewing` as a single-use dispatch phase and moves stale review runs to `recovery` while retaining the review/checkpoint.
+- `generateTripWithGraph` computed `days + 1` when all days existed, causing the graph to call the model for a phantom day. A plan-node guard now routes directly to finalize.
+- Restart deletion was unsafe for any saved day, even without a check-in. Restart now refuses saved dates and `/replan-copy` creates a clean draft while retaining the original trip.
+- Warnings must remain rule warnings; missing-day text belongs in `genError`. Removed the 50-item truncation from warning persistence and kept final graph/database warnings aligned.
+- Isolated test runner now blanks optional Amap/model keys so default checks cannot spend external quota. Proxy checks exercise actual Express fetch and rate-limit behavior.
+- `commit_pending` is a durable database-commit handoff, not checkpoint node replay: the saved `PlannedDay` and accumulated warnings are committed idempotently, then its journal is cleared atomically. A normal continue after success cannot rediscover the old journal.
+- Stale valid `commit_pending` may be reclaimed for the same trip without a model call; malformed payloads are marked `recovery` and are cancellable. Old rows with `genReview` but no `genRunId` are migrated to `recovery` so they cannot become unrouteable.
+- `START` routes directly to `finalize` when `dayIndex > totalDays`; the runtime also finalizes a complete continue before credentials/weather/model context, preserving warnings and avoiding an unresolved-stay model call.

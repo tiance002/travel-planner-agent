@@ -9,14 +9,15 @@ import { z } from 'zod'
 import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { poiFromStay, poiFromTripItem } from '../domain/poi-mapper'
-import { generateTripWithGraph, resumeTripReview } from '../services/agent/graph-run'
-import { acquireRun, releaseRun } from '../services/agent/run-lock'
+import { generateTripWithGraph, prepareTripReview, resumeTripReview } from '../services/agent/graph-run'
+import { acquireRun, releaseRun, cancelSuspendedRun } from '../services/agent/run-lock'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById } from '../services/amap'
 import { parseJsonArray, parseJsonObject } from '../utils/json'
 
-export const tripsRouter = Router()
+export function createTripsRouter(runtime = { generateTripWithGraph, prepareTripReview, resumeTripReview }) {
+const tripsRouter = Router()
 
 // 整个行程模块都要求登录，统一挂上鉴权中间件
 tripsRouter.use(requireAuth)
@@ -142,6 +143,8 @@ tripsRouter.get('/:id', async (req, res, next) => {
     res.json({
       trip: {
         ...trip,
+        completedDayCount: trip.tripDays.filter(d => d.dayIndex >= 1 && d.dayIndex <= trip.days).length,
+        missingDayIndexes: Array.from({ length: trip.days }, (_, i) => i + 1).filter(i => !trip.tripDays.some(d => d.dayIndex === i)),
         preferences: parseJsonArray(trip.preferences),
         extraNeeds: parseJsonArray(trip.extraNeeds),
         // 生成过程中的规则修正提示（报告 A09）。非生成的 trip 该字段为 null，前端按空处理
@@ -214,17 +217,12 @@ tripsRouter.patch('/:id/stay', async (req, res, next) => {
 // AI 生成行程
 // ---------------------------------------------------------------------------
 
-// 判定「卡住的生成任务」的时间。
-//
-// ⚠️ 已废弃（见审查报告任务7）：原来用「updatedAt 超过 10 分钟」判定僵尸任务，
-// 这是错的——任务正常跑 20 分钟、等待人工裁决、用户改了标题，updatedAt 都可能
-// 长时间不变，但它们都不是崩溃。现在僵尸判定改由 run-lock.ts 的**心跳**完成：
-// 只有「持锁任务的心跳停止」才说明进程真的死了。
-// 这行常量保留仅为记录历史决策，不再参与任何夺权逻辑。
+// 生成任务是否失去活性由 run-lock.ts 的心跳和运行阶段共同判定。
+// waiting/recovery 保留人工裁决或恢复载荷；running 的过期心跳才允许安全接管。
 
-// 触发生成时可选的两档语义：
+// 触发生成时可选的语义：
 //   continue —— 保留已经排好的天，从第一个空缺的天接着排（默认，失败后重试也走这条）
-//   restart  —— 清空已有安排，从第 1 天重新排（用户点「重新生成」时用）
+//   restart  —— 只允许空草稿从第 1 天开始；已有日期时返回 409，需先复制为新草稿
 const generateSchema = z.object({
   mode: z.enum(['continue', 'restart', 'review']).default('continue'),
   /**
@@ -255,19 +253,59 @@ const generateSchema = z.object({
  */
 async function markGenerating(
   tripId: string,
-  data: { genProgress: string; genError: null; genReview: null },
+  runId: string,
+  data: { genProgress: string; genError: null },
 ): Promise<boolean> {
   const result = await prisma.trip.updateMany({
     where: {
       id: tripId,
       // 不是 generating 的状态都可以推进（draft/failed/ready/partial）
-      status: { not: 'generating' },
+      genRunId: runId,
+      genRunPhase: 'running',
     },
-    // 新一轮生成清空上一轮的失败原因与提示，避免旧提示串到新结果里
-    data: { status: 'generating', genWarnings: null, ...data },
+    // 新一轮生成清空上一轮失败原因；警告由真实图状态和事务提交重新派生。
+    data: { status: 'generating', ...data },
   })
   return result.count > 0
 }
+
+// Create a clean draft for a new plan while keeping the original Trip,
+// TripDay, and check-in rows untouched.  This is the safe replacement for a
+// destructive restart once an existing itinerary has been saved.
+tripsRouter.post('/:id/replan-copy', async (req: Request<{ id: string }>, res, next) => {
+  try {
+    const source = await prisma.trip.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+      select: {
+        userId: true,
+        title: true,
+        cityName: true,
+        cityAdcode: true,
+        startDate: true,
+        days: true,
+        travelers: true,
+        preferences: true,
+        extraNeeds: true,
+        budgetAmount: true,
+        budgetScope: true,
+        stayResolved: true,
+        stayPoiId: true,
+        stayName: true,
+        stayLng: true,
+        stayLat: true,
+      },
+    })
+    if (!source) {
+      res.status(404).json({ error: '行程不存在' })
+      return
+    }
+    const title = `${source.title}（重新规划）`.slice(0, 60)
+    const trip = await prisma.trip.create({ data: { ...source, title, status: 'draft' } })
+    res.status(201).json({ trip })
+  } catch (error) {
+    next(error)
+  }
+})
 
 // 触发生成。立刻返回 202，真正的生成在后台跑，前端轮询 GET /:id 看进度
 tripsRouter.post(
@@ -285,63 +323,85 @@ tripsRouter.post(
 
       const trip = await prisma.trip.findFirst({
         where: { id: req.params.id, userId: req.user!.userId },
-        select: { id: true, status: true, userId: true },
+        select: { id: true, status: true, userId: true, genReview: true },
       })
       if (!trip) {
         res.status(404).json({ error: '行程不存在' })
         return
       }
 
+      // Restart is intentionally limited to an empty draft.  A saved day is
+      // user data even when it has no check-in yet; refusing here prevents an
+      // accidental delete and tells the caller how to preserve it.  The graph
+      // repeats this check inside its write transaction for the race where a
+      // day is saved after this preflight.
+      if (mode === 'restart' && (trip.genReview !== null || await prisma.tripDay.count({ where: { tripId: trip.id } }) > 0)) {
+        res.status(409).json({ error: '已有保存的行程日期，请使用继续补缺或新建行程后重新规划；原行程未修改' })
+        return
+      }
+
       // 第一步：抢运行锁（任务2）。
       // 这是真正的并发控制——它看的是「后台还有没有任务在跑」，而不是
       // 「此刻有没有 HTTP 请求进来」。响应早就返回了，但锁要等任务结束才放。
-      const acquired = await acquireRun(trip.id, trip.userId)
-      if (!acquired.ok) {
-        res.status(409).json({
-          error:
-            acquired.reason === 'user_busy'
-              ? '你还有一个行程正在生成中，请等它完成后再试'
-              : '这个行程正在生成中，请稍候',
-        })
-        return
+      let acquiredRunId: string | null = null
+      const releaseAcquired = async () => {
+        const runId = acquiredRunId
+        acquiredRunId = null
+        if (runId) await releaseRun(trip.id, runId)
       }
-
-      // 第二步：推进状态机。若状态机因竞态没推进成功（例如刚刚被别的路径改过），
-      // 要把刚抢到的锁放掉，避免留下没人用却占着的锁。
-      const marked = await markGenerating(trip.id, {
-        genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
-        genError: null,
-        genReview: null,
-      })
-      if (!marked) {
-        await releaseRun(trip.id, acquired.runId)
-        res.status(409).json({ error: '这个行程正在生成中，请稍候' })
-        return
-      }
-
-      // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
-      // 失败时把原因写进 genError，前端就能直接展示给用户看。
-      // runId 一起传下去：图在运行期间靠它续心跳、做写入归属校验。
-      const parallelCandidates = parsed.data.parallel ? 2 : 1
-      void generateTripWithGraph(trip.id, {
-        mode,
-        parallelCandidates,
-        runId: acquired.runId,
-      }).catch(async (error: unknown) => {
-        const message = error instanceof Error ? error.message : '生成失败'
-        console.error(`[生成 ${trip.id}] 失败：${message}`)
-        // 兜底清状态：正常情况下 graph-run 的 finally 已经处理过，
-        // 这里只覆盖「图内部抛错且没能自己收尾」的极端情况。
-        await prisma.trip
-          .update({
-            where: { id: trip.id },
-            data: { status: 'failed', genProgress: null, genError: message, genReview: null },
+      try {
+        const acquired = await acquireRun(trip.id, trip.userId)
+        if (!acquired.ok) {
+          res.status(409).json({
+            error:
+              acquired.reason === 'user_busy'
+                ? '你还有一个行程正在生成中，请等它完成后再试'
+                : '这个行程正在生成中，请稍候',
           })
-          .catch(() => undefined)
-        await releaseRun(trip.id, acquired.runId)
-      })
+          return
+        }
+        acquiredRunId = acquired.runId
 
-      res.status(202).json({ ok: true, status: 'generating', mode })
+        // 第二步：推进状态机。若状态机因竞态没推进成功（例如刚刚被别的路径改过），
+        // 要把刚抢到的锁放掉，避免留下没人用却占着的锁。
+        const marked = await markGenerating(trip.id, acquired.runId, {
+          genProgress: mode === 'restart' ? '正在准备（重新生成）' : '正在准备',
+          genError: null,
+        })
+        if (!marked) {
+          await releaseAcquired()
+          res.status(409).json({ error: '这个行程正在生成中，请稍候' })
+          return
+        }
+
+        // 刻意不 await：生成要跑几十秒到几分钟，让接口先返回。
+        // 生成函数完成调用交接后，生命周期由 graph-run 自己收尾。
+        const parallelCandidates = parsed.data.parallel ? 2 : 1
+        const task = runtime.generateTripWithGraph(trip.id, {
+          mode,
+          parallelCandidates,
+          runId: acquired.runId,
+        })
+        acquiredRunId = null
+        void task.catch(async (error: unknown) => {
+          const message = error instanceof Error ? error.message : '生成失败'
+          console.error(`[生成 ${trip.id}] 失败：${message}`)
+          // 生命周期只由持锁的 graph-run 负责；这里仅记录，避免迟到回调
+          // 覆盖后续任务的状态。
+        })
+
+        res.status(202).json({ ok: true, status: 'generating', mode })
+      } catch (error) {
+        // acquire succeeded but mark/dispatch failed before ownership was handed
+        // to graph-run: release the exact token.  A failed release is surfaced
+        // to the normal error handler so a database outage is observable; the
+        // conditional release itself remains safe for a later TTL takeover.
+        await releaseAcquired().catch(releaseError => {
+          console.error(`[生成 ${trip.id}] 领取后收尾失败`, releaseError)
+          throw releaseError
+        })
+        throw error
+      }
     } catch (err) {
       next(err)
     }
@@ -362,16 +422,21 @@ tripsRouter.post(
 const reviewConfirmSchema = z.discriminatedUnion('decision', [
   z.object({
     decision: z.literal('approve'),
+    // Each card is single-use.  The client must echo its id so a delayed
+    // click cannot be applied to a newer review on the same run.
+    reviewId: z.string().uuid(),
     parallel: z.boolean().default(false),
   }),
   z.object({
     decision: z.literal('choose'),
+    reviewId: z.string().uuid(),
     // choose 必须明确指定采用哪个方案，缺了就不是一个合法的裁决
     choice: z.enum(['A', 'B']),
     parallel: z.boolean().default(false),
   }),
   z.object({
     decision: z.literal('reject'),
+    reviewId: z.string().uuid(),
     // 驳回可以不带意见（用默认文案让模型换一批地点），但带了必须长度合规
     feedback: z.string().trim().max(500).optional(),
     parallel: z.boolean().default(false),
@@ -384,7 +449,7 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
   try {
     const trip = await prisma.trip.findFirst({
       where: { id: req.params.id, userId: req.user!.userId },
-      select: { id: true, status: true, genRunId: true, genReview: true },
+      select: { id: true, status: true, genRunId: true, genReview: true, genReviewId: true },
     })
     if (!trip) {
       res.status(404).json({ error: '行程不存在' })
@@ -418,30 +483,38 @@ tripsRouter.post('/:id/review-confirm', async (req, res, next) => {
     // answer 携带用户的裁决：approve（确认采用）/ choose（选 A/B）/ reject（驳回，可附意见）。
     // parallel 由前端一并传回：确认后继续排的后续天，保持同样的并行设置。
     // runId 沿用挂起任务的运行锁：等待期间锁没释放，恢复的正是同一个任务。
-    void resumeTripReview(trip.id, {
+    const claim = await runtime.prepareTripReview(trip.id, {
       answer: {
         decision: confirmBody.decision,
         choice: confirmBody.decision === 'choose' ? confirmBody.choice : undefined,
         feedback: confirmBody.decision === 'reject' ? confirmBody.feedback : undefined,
       },
-      parallelCandidates: confirmBody.parallel ? 2 : 1,
       runId: trip.genRunId,
+      reviewId: confirmBody.reviewId,
+    })
+    void runtime.resumeTripReview(trip.id, {
+      claim,
     }).catch(async (error: unknown) => {
       const message = error instanceof Error ? error.message : '确认失败'
       console.error(`[生成 ${trip.id}] 确认失败：${message}`)
-      await prisma.trip
-        .update({
-          where: { id: trip.id },
-          data: { status: 'failed', genProgress: null, genError: message, genReview: null },
-        })
-        .catch(() => undefined)
-      if (trip.genRunId) await releaseRun(trip.id, trip.genRunId)
+      // 不在HTTP回调释放任务锁；恢复错误保留checkpoint并标记人工恢复。
     })
 
     res.status(202).json({ ok: true, status: 'reviewing', decision: confirmBody.decision })
   } catch (err) {
-    next(err)
+    if (err instanceof Error && 'status' in err) res.status(Number(err.status)).json({ error: err.message })
+    else next(err)
   }
+})
+
+tripsRouter.post('/:id/cancel-generation', async (req, res, next) => {
+  try {
+    if (!await cancelSuspendedRun(req.params.id, req.user!.userId)) {
+      res.status(409).json({ error: '仅可取消等待确认或需人工恢复的任务；执行中的任务请稍候' })
+      return
+    }
+    res.json({ ok: true })
+  } catch (error) { next(error) }
 })
 
 // ---------------------------------------------------------------------------
@@ -684,3 +757,6 @@ tripsRouter.delete('/:id', async (req, res, next) => {
     next(err)
   }
 })
+return tripsRouter
+}
+export const tripsRouter = createTripsRouter()

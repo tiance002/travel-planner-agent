@@ -13,6 +13,24 @@ function required(name: string): string {
   return value
 }
 
+/**
+ * Parse Express's trust-proxy setting without changing its meaning.  A bare
+ * number is a hop count, while names/IPs/CIDRs are proxy address rules.  If a
+ * numeric string is handed to Express as a string it is treated as an
+ * address rule, so keep the distinction explicit here.
+ */
+export function parseTrustedProxies(raw: string | undefined): number | string | string[] | undefined {
+  const value = (raw ?? '').trim()
+  if (!value) return undefined
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value)
+    if (!Number.isSafeInteger(hops)) throw new Error('TRUSTED_PROXIES 的数字跳数过大')
+    return hops
+  }
+  const entries = value.split(',').map(entry => entry.trim()).filter(Boolean)
+  return entries.length === 1 ? entries[0] : entries
+}
+
 export const config = {
   // 后端监听端口
   port: Number(process.env.PORT ?? 3001),
@@ -47,7 +65,7 @@ export const config = {
   //
   // 默认留空是**故意**的：宁可让反代部署少一个真实 IP，也不能让默认配置
   // 允许任何客户端伪造 XFF 绕过限流。反代部署时由运维显式设置。
-  trustedProxies: (process.env.TRUSTED_PROXIES ?? '').trim(),
+  trustedProxies: parseTrustedProxies(process.env.TRUSTED_PROXIES),
 
   // ===== 以下为模型服务的全局默认值（可选）=====
   // 用途：用户还没在「个人设置」里填自己的 API Key 时，后端回退到这里，

@@ -15,6 +15,7 @@
 
 import { prisma } from '../src/db'
 import { generateTripWithGraph } from '../src/services/agent/graph-run'
+import { acquireRun } from '../src/services/agent/run-lock'
 import { geocode } from '../src/services/amap'
 
 const username = process.argv[2] ?? '123'
@@ -65,7 +66,10 @@ try {
   // 走 LangGraph 图版入口（与生产同一条路径）。
   // 见审查报告 A05：这里原来导入的是已删除的旧手写版 generateTrip，
   // 脚本早已跑不起来——它同时也是 tsconfig 不覆盖 scripts 才会漏掉的问题（A06）。
-  await generateTripWithGraph(trip.id, { mode })
+  const acquired = await acquireRun(trip.id, trip.userId)
+  if (!acquired.ok) throw new Error('已有生成任务占用运行权')
+  await prisma.trip.updateMany({ where: { id: trip.id, genRunId: acquired.runId }, data: { status: 'generating' } })
+  await generateTripWithGraph(trip.id, { mode, runId: acquired.runId })
 } catch (error) {
   console.log(`\n生成失败：${error instanceof Error ? error.message : String(error)}`)
 }

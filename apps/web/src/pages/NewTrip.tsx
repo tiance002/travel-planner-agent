@@ -51,6 +51,15 @@ import {
   type WeatherResult,
 } from '../api/amap'
 import { api, extractError } from '../api/client'
+import {
+  cancelGeneration,
+  createReplanDraft,
+  getCompletedDayCount,
+  getMissingDayIndexes,
+  parseGenerationReview,
+  type GenerationReviewRequest,
+  type GenerationRunPhase,
+} from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
 import { FormSection } from '../components/paper'
 
@@ -164,32 +173,6 @@ interface StepOneForm {
 /** 住宿选择方式：自己选，或交给 AI 推荐中心区域 */
 type StayMode = 'manual' | 'undecided'
 
-/** 并行择优卡片上的单个候选方案（服务端 genReview 载荷） */
-interface ReviewCandidate {
-  label: 'A' | 'B'
-  summary: string
-  /** 景点评分均值（一位小数） */
-  ratingAvg: number
-  /** 全天驾车通勤总分钟数（估算）。null = 查询失败，无可用数据 */
-  commuteMinutes: number | null
-  /** 全天公共交通通勤总分钟数（估算）。null = 查不到公交方案 */
-  transitMinutes: number | null
-  spotCount: number
-  pros: string[]
-  cons: string[]
-}
-
-/** 图版交互模式的服务端待裁决载荷 */
-interface ReviewRequest {
-  kind: 'confirm' | 'choose'
-  dayIndex: number
-  totalDays: number
-  /** kind=confirm 时的一句话摘要 */
-  summary?: string
-  /** kind=choose 时的两个候选 */
-  candidates?: ReviewCandidate[]
-}
-
 /**
  * 行程生成状态。
  *
@@ -227,11 +210,17 @@ export default function NewTrip() {
   const [genStatus, setGenStatus] = useState<GenStatus>('draft')
   const [genProgress, setGenProgress] = useState('')
   const [genError, setGenError] = useState('')
-  /** 已完成到第几天。服务端按天生成，这个数字让进度看得见 */
-  const [genDayIndex, setGenDayIndex] = useState<number | null>(null)
+  /** 已真实落库的天数与缺失日期，不能用生成游标代替 */
+  const [completedDayCount, setCompletedDayCount] = useState(0)
+  const [missingDayIndexes, setMissingDayIndexes] = useState<number[]>([])
   /** 生成过程中服务端自动修正过的规则提示（通勤超时换点、天型降档等） */
   const [genWarnings, setGenWarnings] = useState<string[]>([])
+  const [genRunPhase, setGenRunPhase] = useState<GenerationRunPhase>(null)
+  const [genReviewId, setGenReviewId] = useState<string | null>(null)
   const pollTimer = useRef<number | null>(null)
+  /** 切换到重新规划副本后，旧行程在途响应不得覆盖新行程的状态。 */
+  const pollTripIdRef = useRef<string | null>(null)
+  const pollTokenRef = useRef(0)
   /** 连续轮询失败次数（任务4）。成功一次即归零，用于区分「偶发抖动」与「持续不可达」 */
   const pollFailuresRef = useRef(0)
 
@@ -239,7 +228,7 @@ export default function NewTrip() {
   /** 逐天人工确认：每排完一天暂停，展示摘要，等用户点头再排下一天 */
   const [reviewEnabled, setReviewEnabled] = useState(false)
   /** 服务端发来的待裁决载荷（genReview JSON 解析）。null 表示没有暂停等待裁决 */
-  const [reviewRequest, setReviewRequest] = useState<ReviewRequest | null>(null)
+  const [reviewRequest, setReviewRequest] = useState<GenerationReviewRequest | null>(null)
   /** 驳回时填的修改意见（可空 = 不满意但没具体说，AI 会换一批地点重排） */
   const [reviewFeedback, setReviewFeedback] = useState('')
   const [confirming, setConfirming] = useState(false)
@@ -386,20 +375,27 @@ export default function NewTrip() {
    * 长则一两分钟。让一个请求挂那么久，中间任何一环超时都会让用户白等。
    * 改成「服务端在后台跑 + 前端每隔几秒问一次」，体验和稳定性都更好。
    */
-  async function pollGeneration(tripId: string) {
+  async function pollGeneration(tripId: string, token = pollTokenRef.current) {
+    if (pollTripIdRef.current !== tripId || token !== pollTokenRef.current) return
     try {
       const { data } = await api.get<{
         trip: {
           status: string
+          days: number
+          tripDays: Array<{ dayIndex: number }>
           genProgress: string | null
           genError: string | null
-          genDayIndex: number | null
           genReview: string | null
+          genReviewId: string | null
+          genRunPhase: GenerationRunPhase
+          completedDayCount?: number
+          missingDayIndexes?: number[]
           genWarnings?: string[]
         }
       }>(`/trips/${tripId}`)
 
       const trip = data.trip
+      if (pollTripIdRef.current !== tripId || token !== pollTokenRef.current) return
       // 拉取成功即重置失败计数，保证「偶发抖动」永远不会累积到放弃阈值
       pollFailuresRef.current = 0
       // partial = 部分完成（有跳过的天）。它属于「已结束」而不是「进行中」，
@@ -409,23 +405,30 @@ export default function NewTrip() {
       // 图版交互模式：genReview 是服务端 interrupt 的结构化载荷（JSON 字符串）。
       // kind=confirm 单方案确认/驳回；kind=choose 双方案对比挑选。
       // 解析失败按「没有待裁决内容」处理，不影响其它状态的展示。
-      let request: ReviewRequest | null = null
-      if (trip.genReview) {
-        try {
-          request = JSON.parse(trip.genReview) as ReviewRequest
-        } catch {
-          request = null
-        }
-      }
-      setReviewRequest(request)
+      setReviewRequest(parseGenerationReview(trip.genReview))
+      setGenReviewId(trip.genReviewId ?? null)
+      setGenRunPhase(trip.genRunPhase ?? null)
       setGenError(trip.genError ?? '')
-      setGenDayIndex(trip.genDayIndex ?? null)
+      setCompletedDayCount(
+        getCompletedDayCount({
+          days: trip.days,
+          completedDayCount: trip.completedDayCount,
+          tripDays: trip.tripDays,
+        }),
+      )
+      setMissingDayIndexes(
+        getMissingDayIndexes({
+          days: trip.days,
+          missingDayIndexes: trip.missingDayIndexes,
+          tripDays: trip.tripDays,
+        }),
+      )
       // 规则修正提示（报告 A09）：这些是「AI 原本排得不合理、已被自动纠正」
       // 的记录，让用户能判断生成质量，而不是只看到一个「已完成」
       setGenWarnings(trip.genWarnings ?? [])
 
       if (trip.status === 'generating') {
-        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
+        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId, token), 2500)
       } else {
         setGenerating(false)
       }
@@ -436,8 +439,9 @@ export default function NewTrip() {
       // 用户完全不知道后台其实还在生成。这里改成：只要用户还停留在生成态，
       // 就隔一会儿重试；连续失败若干次后才真正放弃并给提示，避免无限空转。
       pollFailuresRef.current += 1
+      if (pollTripIdRef.current !== tripId || token !== pollTokenRef.current) return
       if (pollFailuresRef.current <= MAX_POLL_FAILURES) {
-        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId), 2500)
+        pollTimer.current = window.setTimeout(() => void pollGeneration(tripId, token), 2500)
         return
       }
       setGenError(extractError(err, '读取生成状态失败，请刷新页面查看'))
@@ -449,15 +453,37 @@ export default function NewTrip() {
    * 触发生成。
    *
    * mode 有两种：continue 保留已经排好的天，从第一个空缺的天接着排；
-   * restart 清空已有安排从第 1 天重来。服务端是按天生成的，
-   * 所以中途失败时用户可以先「继续」，不必把已经排好的几天一起废掉。
+   * restart 对已有日期会先复制基础配置到新草稿，再从第 1 天重新规划；
+   * 原行程与打卡数据保持不动。服务端是按天生成的，所以中途失败时用户可以先「继续」。
    *
-   * 勾了「逐天人工确认」时走图版专属的 review 模式（等价于从头重排 +
-   * 每天暂停等确认），此时「继续生成」没有意义（见渲染处的隐藏逻辑）。
+   * 勾了「逐天人工确认」时走图版专属的 review 模式；服务端会保留已有日期，
+   * 因此 partial 也可以在这个模式下安全补缺。
    * 「并行择优」作为独立开关随请求带给服务端，由它决定是否强制走图版。
    */
   async function startGenerate(mode: 'continue' | 'restart') {
     if (!savedTripId) return
+
+    let targetTripId = savedTripId
+    // 后端会拒绝对已有日期的 restart，避免误删已确认内容；这里先创建安全副本，
+    // 原行程与打卡数据保持不动，新副本再按当前 review/普通模式开始生成。
+    if (mode === 'restart' && completedDayCount > 0) {
+      try {
+        targetTripId = await createReplanDraft(savedTripId)
+        setSavedTripId(targetTripId)
+        setCompletedDayCount(0)
+        setMissingDayIndexes(Array.from({ length: totalDays }, (_, index) => index + 1))
+      } catch (err) {
+        message.error(extractError(err, '创建重新规划副本失败，原行程未修改'))
+        return
+      }
+    }
+
+    pollTokenRef.current += 1
+    pollTripIdRef.current = targetTripId
+    if (pollTimer.current !== null) {
+      window.clearTimeout(pollTimer.current)
+      pollTimer.current = null
+    }
 
     const actualMode = reviewEnabled ? 'review' : mode
     setGenerating(true)
@@ -465,6 +491,8 @@ export default function NewTrip() {
     pollFailuresRef.current = 0
     setGenError('')
     setReviewRequest(null)
+    setGenReviewId(null)
+    setGenRunPhase('running')
     setReviewFeedback('')
     setGenProgress(
       reviewEnabled
@@ -474,14 +502,13 @@ export default function NewTrip() {
           : '正在准备',
     )
     setGenStatus('generating')
-    if (actualMode !== 'continue') setGenDayIndex(null)
 
     try {
-      await api.post(`/trips/${savedTripId}/generate`, {
+      await api.post(`/trips/${targetTripId}/generate`, {
         mode: actualMode,
         parallel: parallelEnabled,
       })
-      void pollGeneration(savedTripId)
+      void pollGeneration(targetTripId, pollTokenRef.current)
     } catch (err) {
       setGenError(extractError(err, '触发失败，请稍后重试'))
       setGenerating(false)
@@ -498,16 +525,22 @@ export default function NewTrip() {
    */
   async function confirmReview(answer: { decision: 'approve' | 'choose' | 'reject'; choice?: 'A' | 'B' }) {
     if (!savedTripId) return
+    if (!genReviewId) {
+      message.warning('待确认方案标识已丢失，请刷新后重新选择')
+      return
+    }
     setConfirming(true)
     try {
       await api.post(`/trips/${savedTripId}/review-confirm`, {
         decision: answer.decision,
         choice: answer.choice,
         feedback: answer.decision === 'reject' ? reviewFeedback.trim() || undefined : undefined,
+        reviewId: genReviewId,
         parallel: parallelEnabled,
       })
       setReviewRequest(null)
       setReviewFeedback('')
+      setGenRunPhase('running')
     } catch (err) {
       setGenError(extractError(err, '操作失败，请稍后重试'))
     } finally {
@@ -515,9 +548,27 @@ export default function NewTrip() {
     }
   }
 
+  /** 仅取消等待确认/人工恢复阶段，服务端会保留已落库日期与打卡数据。 */
+  async function cancelCurrentGeneration() {
+    if (!savedTripId) return
+    try {
+      await cancelGeneration(savedTripId)
+      setReviewRequest(null)
+      setReviewFeedback('')
+      setGenReviewId(null)
+      setGenRunPhase(null)
+      await pollGeneration(savedTripId, pollTokenRef.current)
+      message.success('已取消未确认方案，可继续补齐缺失日期')
+    } catch (err) {
+      message.error(extractError(err, '当前生成仍在执行，请稍候再试'))
+    }
+  }
+
   // 离开页面时清掉定时器，避免在后台空转
   useEffect(() => {
     return () => {
+      pollTokenRef.current += 1
+      pollTripIdRef.current = null
       if (pollTimer.current !== null) window.clearTimeout(pollTimer.current)
     }
   }, [])
@@ -554,14 +605,18 @@ export default function NewTrip() {
     [weather],
   )
 
-  // 逐天生成的进度。服务端把「已完成到第几天」写在 genDayIndex 上
+  // 进度必须按服务端真实落库日期计算，不能用生成序号推断连续完成。
   const totalDays = stepOne?.days ?? 0
-  const doneDays = genDayIndex ?? 0
-  // 「继续生成」的适用条件：整趟没跑完（failed 失败，或 partial 有跳过的天），
-  // 且已经排好了部分天数——这时值得给一个「继续」而不是逼着他从头重来。
-  // 报告 A08：partial 状态必须给用户这条出口，否则缺失的天无从补齐。
-  const canContinue =
-    (genStatus === 'failed' || genStatus === 'partial') && doneDays > 0 && doneDays < totalDays
+  const doneDays = completedDayCount
+  const commitPending = genRunPhase === 'commit_pending'
+  // partial/failed 都没有正在执行的模型任务；即使服务端已经落库全部日期，
+  // 也要保留幂等 continue 入口，让后端完成最后的收尾状态推进。
+  const canContinue = genStatus === 'failed' || genStatus === 'partial'
+  const continueLabel = commitPending
+    ? '重试保存已生成安排'
+    : missingDayIndexes.length > 0
+      ? `继续补齐${missingDayIndexes.length === 1 ? `第 ${missingDayIndexes[0]} 天` : `第 ${missingDayIndexes.join('、')} 天`}`
+      : '核对并完成行程'
 
   return (
     <div style={{ maxWidth: 1080, margin: '0 auto' }}>
@@ -889,7 +944,17 @@ export default function NewTrip() {
               {genStatus === 'ready' ? (
                 <Tag color="green">已生成</Tag>
               ) : genStatus === 'generating' ? (
-                <Tag color="processing">生成中</Tag>
+                <Tag color={genRunPhase === 'waiting' || genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
+                  {genRunPhase === 'waiting'
+                    ? '等待确认'
+                    : genRunPhase === 'recovery'
+                      ? '需要恢复'
+                      : commitPending
+                        ? '保存待重试'
+                        : '生成中'}
+                </Tag>
+              ) : genStatus === 'partial' ? (
+                <Tag color="warning">部分完成</Tag>
               ) : genStatus === 'failed' ? (
                 <Tag color="red">生成失败</Tag>
               ) : (
@@ -976,7 +1041,7 @@ export default function NewTrip() {
           {/* 图版交互模式：图暂停在 interrupt 上时弹出裁决卡片。
               kind=confirm 单方案（确认/驳回），kind=choose 双方案（挑一个/都驳回）。
               驳回可附修改意见，AI 会按意见重排这一天。 */}
-          {reviewRequest && genStatus === 'generating' && (
+          {reviewRequest && genStatus === 'generating' && genRunPhase === 'waiting' && (
             <div
               data-testid="review-card"
               style={{
@@ -1092,50 +1157,98 @@ export default function NewTrip() {
                 >
                   需要调整，按意见重新安排
                 </Button>
+                <Button
+                  size="small"
+                  loading={confirming}
+                  data-testid="review-cancel-btn"
+                  onClick={() => void cancelCurrentGeneration()}
+                >
+                  取消未确认方案
+                </Button>
               </Space>
             </div>
           )}
 
+          {genStatus === 'generating' && genRunPhase === 'waiting' && !reviewRequest && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="有待确认内容，但卡片暂时无法读取"
+              description="请刷新后重试；如果仍无法恢复，可以取消未确认方案，保留已落库日期后安全补缺。"
+              action={
+                <Button size="small" onClick={() => void cancelCurrentGeneration()}>
+                  取消并安全补缺
+                </Button>
+              }
+            />
+          )}
+
+          {genStatus === 'generating' && genRunPhase === 'recovery' && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="这次确认需要人工恢复"
+              description="原有候选方案已保留，取消后会保留已落库日期和打卡数据，再从缺失日期安全补齐。"
+              action={
+                <Button size="small" onClick={() => void cancelCurrentGeneration()}>
+                  取消并安全补缺
+                </Button>
+              }
+            />
+          )}
+
+          {genStatus === 'generating' && commitPending && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              title="安排已生成，保存未成功"
+              description="服务端正在等待安全的保存重试；恢复为失败状态后点击「重试保存已生成安排」，不会再次调用模型。"
+            />
+          )}
+
           <Space style={{ marginBottom: 16 }} wrap>
-            {canContinue && !reviewEnabled && (
+            {canContinue && (
               <Button
                 type="primary"
                 data-testid="generate-continue-btn"
                 loading={generating}
                 onClick={() => void startGenerate('continue')}
               >
-                继续生成第 {doneDays + 1} 天
+                {continueLabel}
               </Button>
             )}
             <Button
-              type={canContinue && !reviewEnabled ? 'default' : 'primary'}
+              type={canContinue ? 'default' : 'primary'}
               data-testid="generate-btn"
               loading={generating}
               onClick={() =>
-                void startGenerate(genStatus === 'ready' || doneDays > 0 ? 'restart' : 'continue')
+                void startGenerate(commitPending ? 'continue' : genStatus === 'ready' || doneDays > 0 ? 'restart' : 'continue')
               }
             >
-              {reviewEnabled
-                ? genStatus === 'ready' || doneDays > 0
-                  ? '重新逐天确认生成'
-                  : '开始生成（逐天确认）'
-                : genStatus === 'ready'
-                  ? '重新生成'
-                  : doneDays > 0
-                    ? '从头重新生成'
-                    : '开始生成行程'}
+                {commitPending
+                  ? '重试保存已生成安排'
+                  : reviewEnabled
+                  ? genStatus === 'ready' || doneDays > 0
+                   ? '新建副本逐天确认'
+                   : '开始生成（逐天确认）'
+                  : genStatus === 'ready'
+                   ? '新建副本重新规划'
+                   : doneDays > 0
+                     ? '新建副本重新规划'
+                     : '开始生成行程'}
             </Button>
             {generating && (
               <Typography.Text type="secondary">生成在服务端进行，请勿关闭当前账号的会话</Typography.Text>
             )}
           </Space>
 
-          {(genStatus === 'generating' || genStatus === 'partial' || doneDays > 0) && (
+          {(genStatus === 'ready' || genStatus === 'generating' || genStatus === 'partial' || doneDays > 0) && (
             <div data-testid="gen-progress" style={{ marginBottom: 16 }}>
               <Alert
-                // partial 用 error 而不是 warning：它意味着整趟没跑完，
-                // 用户需要主动决定是「接着排剩下的」还是「重新生成」（报告 A08）
-                type={genStatus === 'generating' ? 'info' : genStatus === 'partial' ? 'error' : 'warning'}
+                type={genStatus === 'generating' ? 'info' : genStatus === 'partial' ? 'warning' : genStatus === 'ready' ? 'success' : 'warning'}
                 showIcon
                 title={
                   genStatus === 'generating'
@@ -1143,15 +1256,19 @@ export default function NewTrip() {
                       ? 'AI 正在等待你的裁决（见上方卡片）'
                       : `AI 正在排程：${genProgress || '准备中'}`
                     : genStatus === 'partial'
-                      ? genError || `已排好 ${doneDays}/${totalDays} 天，有部分天数未能完成`
-                      : `已排好 ${doneDays}/${totalDays} 天`
+                      ? `已完成 ${doneDays}/${totalDays} 天${missingDayIndexes.length > 0 ? `，待补齐第 ${missingDayIndexes.join('、')} 天` : '，没有缺失日期，可核对并完成行程'}`
+                      : genStatus === 'ready'
+                        ? `行程已完成：${doneDays}/${totalDays} 天`
+                        : `已排好 ${doneDays}/${totalDays} 天`
                 }
                 description={
                   genStatus === 'generating'
                     ? '正在调用高德接口查询景点、餐厅与真实路线，每排完一天就会立刻存下来。'
                     : genStatus === 'partial'
-                      ? '缺失的天没有生成数据。可以点「继续生成」把它们补上，或「从头重新生成」重排整趟。'
-                      : '上面这些天已经保存在行程里了，可以接着把剩下的排完。'
+                      ? `${genError ? `${genError}。` : ''}${missingDayIndexes.length > 0 ? '缺失的天没有生成数据，可以点「继续补齐」保留已有日期，或选择「新建副本重新规划」。' : '可以点「核对并完成行程」完成最终状态收尾，或选择「新建副本重新规划」。'}`
+                      : genStatus === 'ready'
+                        ? '所有日期都已保存，可以到「我的行程」查看时间轴、地图与打卡。'
+                        : '上面这些天已经保存在行程里了，可以接着把剩下的排完。'
                 }
               />
               <Progress
@@ -1159,7 +1276,7 @@ export default function NewTrip() {
                 size="small"
                 format={() => `${doneDays}/${totalDays} 天`}
                 style={{ marginTop: 8 }}
-                status={genStatus === 'partial' ? 'exception' : undefined}
+                status={genStatus === 'partial' ? 'exception' : genStatus === 'ready' ? 'success' : undefined}
               />
             </div>
           )}
@@ -1199,12 +1316,17 @@ export default function NewTrip() {
               description={
                 <span>
                   {genError}
-                  {doneDays > 0 && (
+                  {missingDayIndexes.length > 0 ? (
                     <>
                       <br />
-                      已经排好的 {doneDays} 天不受影响，点「继续生成第 {doneDays + 1} 天」就能接着来。
+                      已经排好的 {doneDays} 天不受影响，点「继续补齐」即可处理第 {missingDayIndexes.join('、')} 天。
                     </>
-                  )}
+                  ) : canContinue ? (
+                    <>
+                      <br />
+                      没有缺失日期，点「核对并完成行程」即可完成最终状态收尾。
+                    </>
+                  ) : null}
                 </span>
               }
             />
@@ -1227,14 +1349,24 @@ export default function NewTrip() {
               </Typography.Text>
             </InfoBlock>
 
-            <InfoBlock label="状态" token={token}>
-              {genStatus === 'ready' ? (
-                <Tag color="green">已生成</Tag>
-              ) : genStatus === 'generating' ? (
-                <Tag color="processing">生成中</Tag>
-              ) : genStatus === 'failed' ? (
-                <Tag color="red">生成失败</Tag>
-              ) : (
+             <InfoBlock label="状态" token={token}>
+               {genStatus === 'ready' ? (
+                 <Tag color="green">已生成</Tag>
+               ) : genStatus === 'generating' ? (
+                 <Tag color={genRunPhase === 'waiting' || genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
+                   {genRunPhase === 'waiting'
+                     ? '等待确认'
+                     : genRunPhase === 'recovery'
+                       ? '需要恢复'
+                       : commitPending
+                         ? '保存待重试'
+                         : '生成中'}
+                 </Tag>
+               ) : genStatus === 'partial' ? (
+                 <Tag color="warning">部分完成</Tag>
+               ) : genStatus === 'failed' ? (
+                 <Tag color="red">生成失败</Tag>
+               ) : (
                 <Tag>草稿</Tag>
               )}
             </InfoBlock>

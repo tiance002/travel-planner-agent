@@ -15,6 +15,7 @@ import {
   releaseRun,
   isRunOwner,
   countStaleRuns,
+  cancelSuspendedRun,
   HEARTBEAT_TTL_MS,
 } from '../src/services/agent/run-lock'
 
@@ -194,6 +195,21 @@ async function main() {
 
   const zombieCount = await countStaleRuns()
   check('僵尸计数为非负整数', Number.isInteger(zombieCount) && zombieCount >= 0, true)
+
+  // A kind-only check is unsafe: a truncated journal must never be reclaimed
+  // as a no-model retry.  It should become explicit recovery and remain
+  // cancellable without touching saved days.
+  console.log('\n--- 损坏 commit_pending journal：降级 recovery，不自动生成 ---')
+  const corruptTrip = await makeTrip(1, 'failed')
+  await prisma.trip.update({ where: { id: corruptTrip.id }, data: {
+    genRunPhase: 'commit_pending',
+    genReview: JSON.stringify({ kind: 'commit_pending', dayIndex: 1, totalDays: 1, warnings: [], day: { dayIndex: 1 } }),
+  } })
+  const corruptAcquire = await acquireRun(corruptTrip.id, tempUserId)
+  check('损坏 journal 不会被自动接管生成', corruptAcquire.ok, false)
+  const corruptState = await prisma.trip.findUniqueOrThrow({ where: { id: corruptTrip.id }, select: { genRunId: true, genRunPhase: true } })
+  check('损坏 journal 转为 recovery 且不持有运行锁', [corruptState.genRunPhase, corruptState.genRunId], ['recovery', null])
+  check('损坏 journal 可安全取消', await cancelSuspendedRun(corruptTrip.id, tempUserId), true)
 }
 
 try {

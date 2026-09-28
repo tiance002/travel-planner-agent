@@ -131,6 +131,14 @@ model Trip {
   genHeartbeatAt DateTime?
   /// 当前任务的启动时间，用于展示与排查「这个任务跑了多久」
   genRunStartedAt DateTime?
+  /// 持锁时等于 userId，空闲为 null；数据库唯一约束保证用户级原子互斥。
+  genActiveUserId String? @unique
+  /// running 执行 / waiting 人工裁决（不超时）/ reviewing 单次裁决领取 / commit_pending 已生成待提交 / recovery 需人工取消后补缺
+  genRunPhase String?
+  /// 原任务可信配置，恢复不得使用客户端重新传入的并行开关。
+  genRunConfig String?
+  /// 每次 interrupt 的不可复用裁决标识。
+  genReviewId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -104,6 +104,7 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 | POST | `/api/trips` | 创建行程草稿 |
 | GET | `/api/trips/:id` | 行程详情，含每日安排与条目 |
 | PATCH | `/api/trips/:id/stay` | 写入或清除住宿锚点 |
+| POST | `/api/trips/:id/replan-copy` | 复制行程基础信息为全新草稿，保留原行程、日期与打卡 |
 | POST | `/api/trips/:id/generate` | 触发 AI 生成行程。立即返回 202，进度通过详情接口轮询 |
 | POST | `/api/trips/:id/review-confirm` | 「逐天确认 / 并行择优」模式下提交裁决：采用 / 二选一 / 驳回 |
 | POST | `/api/trips/:tripId/items/:itemId/checkin` | 到点打卡 |
@@ -149,16 +150,16 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 请求体可选 `{ "mode": "continue" | "restart" | "review", "parallel": boolean }`：
 
 - `continue`（默认）—— 保留已经排好的天，从第一个空缺的天接着排。失败后重试走这条，不会重跑已经完成的天。
-- `restart` —— 清空已有安排，从第 1 天重来。页面上点「重新生成」时用它。
+- `restart` —— 仅适用于还没有保存日期的空草稿，从第 1 天开始。已有日期时返回 409 并保留原行程；需要重新规划时先调用 `replan-copy`，再对返回的新草稿调用 `generate`。
 - `review` —— 清空重排，且**每排完一天就暂停等你确认**。点「开始生成（逐天确认）」时用它；
   暂停后由 `POST /api/trips/:id/review-confirm` 提交裁决来恢复。
 - `parallel`（默认 `false`）—— 「并行择优」开关：每天并行生成 2 套方案，再按评分、通勤与景点数打分取优，
   模型消耗与耗时约翻倍。
 
-`review-confirm` 的请求体为 `{ "decision": "approve" | "choose" | "reject", "choice"?: "A" | "B", "feedback"?: "...", "parallel"?: boolean }`：
+`review-confirm` 的请求体为 `{ "reviewId": "<当前待确认卡片 UUID>", "decision": "approve" | "choose" | "reject", "choice"?: "A" | "B", "feedback"?: "..." }`：
 确认采用走 `approve`，二选一走 `choose` + `choice`，驳回则用 `reject` 并可附上意见（会写回图状态，由条件边触发该天重排）。
 
-> 生成是异步的：接口返回后服务端继续跑。行程状态走 `draft → generating → ready / failed`，
+> 生成是异步的：接口返回后服务端继续跑。行程状态走 `draft → generating → waiting / reviewing → ready / partial / failed`；恢复进程崩溃时会进入 `recovery`，先取消未确认方案再安全补缺。
 > `genProgress` 是当前进度文案、`genDayIndex` 是已完成到第几天（前端每 2.5 秒轮询一次），
 > 失败时 `genError` 写明原因，**但已经排好的天会留在库里**。
 
@@ -201,7 +202,7 @@ Prisma 7 有两处与网上多数教程不同的破坏性变更，改动是刻�
 
 一天大约十到二十秒，会真实调用模型与高德接口十余次。开发期想看完整产出与每天的分段耗时，
 在项目根目录执行 `npm run try:generate -- <用户名> <天数>`，
-终端会打印每一步工具调用与最终行程（末尾加 `restart` 可验证清空重排）。
+终端会打印每一步工具调用与最终行程；`restart` 只适用于没有保存日期的草稿，已有行程请先调用 `replan-copy` 创建安全副本。
 
 ### 编排：LangGraph 状态图
 
@@ -223,7 +224,7 @@ START → resolveAnchor → planDay → reviewDay ─┬─ 还有下一天 ─�
 
 1. **为什么用图而不是手写循环。** 这套流程需要「跑到一半停下来问用户，问完从原地继续」，
    而「继续」发生时进程可能已经重启。LangGraph 的 **checkpoint（检查点）** 把每一步的图状态
-   持久化下来（`thread_id` 就是行程 id），暂停后能精确恢复。手写版本得自己实现这套状态序列化，
+   持久化下来（`thread_id` 使用 `${tripId}:${runId}`，每次运行隔离），暂停后能精确恢复。手写版本得自己实现这套状态序列化，
    容易出错——**P15 已把手写编排整体删除，现在只有图这一条路径**。
 2. **交互模式下 `planDay` 不落库，只把方案挂在图状态里。** 因为驳回重排时，跨天状态
    （已用地点清单、前一天强度、已用夜间类型）已经吸收了这一天的内容，先落库再重排会被
@@ -419,7 +420,7 @@ npm run test
 | `DEFAULT_MODEL_API_KEY` | 兜底模型 Key。**填了它，所有未配置 Key 的账号都会消耗这个 Key 的余额**，生产环境请留空 |
 | `MODEL_MAX_OUTPUT_TOKENS` | 模型单次输出上限，默认 8192。调小可降低长行程被截断的风险 |
 | `PARALLEL_CANDIDATES` | 「并行择优」每天生成的候选方案数，默认 1（即不并行） |
-| `TRUSTED_PROXIES` | 反向代理的信任链（如 `loopback` 或 `10.0.0.0/8`），逗号分隔。**留空 = 不信任任何 `X-Forwarded-For`**，限流按 TCP 对端 IP 计。只在确实部署在可信反代之后时才设置 |
+| `TRUSTED_PROXIES` | 反向代理的信任链。纯数字（如 `1`）按可信代理跳数解析；也可用 `loopback`、IP/CIDR，多个地址逗号分隔。**留空 = 不信任任何 `X-Forwarded-For`**，限流按 TCP 对端 IP 计。只在确实部署在可信反代之后时才设置 |
 
 > 高德开放平台需要分别申请「Web 服务」与「Web 端(JS API)」两种类型的 Key，二者用途不同、不可混用。
 > 所有高德配置**只维护 `apps/server/.env` 这一份**，前端不单独存放，避免出现两处不一致。

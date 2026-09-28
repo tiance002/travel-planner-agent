@@ -36,6 +36,7 @@ const STATUS_DOT: Record<string, { label: string; dot: string }> = {
   draft: { label: '草稿', dot: '#c9bda6' },
   generating: { label: '生成中', dot: '#79b8e8' },
   ready: { label: '已完成', dot: '#7fd6a8' },
+  partial: { label: '部分完成', dot: '#e0a84f' },
   failed: { label: '生成失败', dot: '#f0928c' },
 }
 

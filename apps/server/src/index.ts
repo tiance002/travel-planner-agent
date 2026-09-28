@@ -22,7 +22,7 @@ const app = express()
 // 这时 req.ip 才会按信任链计算。**绝不使用 `trust proxy = true`**：
 // 那等于告诉 Express「所有代理都可信」，客户端只要自己加一个 XFF 头，
 // 就能伪装成任意 IP 绕过限流。
-if (config.trustedProxies) {
+if (config.trustedProxies !== undefined) {
   app.set('trust proxy', config.trustedProxies)
 }
 

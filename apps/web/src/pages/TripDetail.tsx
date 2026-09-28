@@ -20,6 +20,8 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Input,
+  Popconfirm,
   Radio,
   Row,
   Skeleton,
@@ -36,14 +38,20 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { fetchPoiPhotos, planRoute, type RouteMode, type RouteResult } from '../api/amap'
 import { api, extractError } from '../api/client'
 import {
+  cancelGeneration,
   checkinItem,
+  createReplanDraft,
   DAY_TYPE_LABEL,
+  getCompletedDayCount,
+  getMissingDayIndexes,
   getItemAlternatives,
   getTrip,
+  parseGenerationReview,
   replaceItem,
   uncheckinItem,
   type AlternativeCandidate,
   type DayType,
+  type GenerationReviewRequest,
   type TripDayData,
   type TripDetailData,
   type TripItemData,
@@ -244,6 +252,15 @@ export default function TripDetail() {
   /** 当前查看第几天（1 起）。默认落在「今天」，不在行程区间内则看第 1 天 */
   const [activeDay, setActiveDay] = useState(1)
   const initializedDayRef = useRef(false)
+  /**
+   * 详情请求的代际保护。
+   *
+   * 复制行程后会立即切到新 id；旧行程的 GET 可能仍在飞行中，返回后不能
+   * 覆盖新页面的 trip、错误或 loading 状态。轮询也复用 loadTrip，所以同一
+   * 个保护同时覆盖手动刷新、继续补缺和轮询请求。
+   */
+  const activeTripIdRef = useRef(id)
+  const loadRequestSeqRef = useRef(0)
 
   /** 用户点选中的条目（列表 ↔ 地图联动的高亮对象） */
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
@@ -260,6 +277,13 @@ export default function TripDetail() {
 
   /** 打卡中的条目集合，让按钮各自转圈而不是整页禁用 */
   const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set())
+
+  /** 详情页刷新后仍可操作的待裁决卡片与安全恢复动作 */
+  const [reviewFeedback, setReviewFeedback] = useState('')
+  const [reviewConfirming, setReviewConfirming] = useState(false)
+  const [continuing, setContinuing] = useState(false)
+  const [cancellingGeneration, setCancellingGeneration] = useState(false)
+  const [replanning, setReplanning] = useState(false)
 
   /** 「换一个」抽屉的开关与内容 */
   const [swapOpen, setSwapOpen] = useState(false)
@@ -285,9 +309,17 @@ export default function TripDetail() {
 
   // --- 数据加载 ---------------------------------------------------------------
 
-  async function loadTrip() {
+  async function loadTrip(
+    requestedId = id,
+    requestedSeq = loadRequestSeqRef.current,
+  ) {
+    const isCurrentRequest = () =>
+      activeTripIdRef.current === requestedId && loadRequestSeqRef.current === requestedSeq
+
     try {
-      const data = await getTrip(id)
+      const data = await getTrip(requestedId)
+      if (!isCurrentRequest()) return null
+      setLoadError('')
       setTrip(data)
 
       // 只在第一次加载时决定默认看到哪天：今天在行程区间内就看今天
@@ -299,15 +331,38 @@ export default function TripDetail() {
       }
       return data
     } catch (err) {
+      if (!isCurrentRequest()) return null
       setLoadError(extractError(err, '行程加载失败'))
       return null
     } finally {
-      setLoading(false)
+      if (isCurrentRequest()) setLoading(false)
     }
   }
 
   useEffect(() => {
-    void loadTrip()
+    const requestSeq = loadRequestSeqRef.current + 1
+    activeTripIdRef.current = id
+    loadRequestSeqRef.current = requestSeq
+
+    // 切换详情时先清掉旧行程的局部视图，避免旧路线、选中项或当天短暂留在新 id 上。
+    initializedDayRef.current = false
+    setTrip(null)
+    setLoading(true)
+    setLoadError('')
+    setActiveDay(1)
+    setSelectedItemId(null)
+    setMapCenter(undefined)
+    setRoutes([])
+    setRouteWarn('')
+    setRouteLoading(false)
+    routeCacheRef.current.clear()
+    setReviewFeedback('')
+    setSwapOpen(false)
+    setSwapTarget(null)
+    setCandidates([])
+    setCandidatesError('')
+    setCheckingIds(new Set())
+    void loadTrip(id, requestSeq)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
@@ -327,6 +382,9 @@ export default function TripDetail() {
     fetch: loadTrip,
     getStatus: (data) => data.status,
     intervalMs: 2500,
+    // 续跑/取消等用户动作会让状态从终态重新进入 generating，
+    // enabled 随服务端状态变化，确保轮询能够重新启动而不是只在挂载时运行。
+    enabled: trip?.status === 'generating',
     onStatusChange: (status, data) => {
       // 只在「生成结束」的那一次给提示：ready 是完全成功，
       // partial 是部分成功（有跳过的天），两者对用户的含义不同（报告 A08）。
@@ -365,6 +423,11 @@ export default function TripDetail() {
   // 第一次渲染（loading）会少走一个 hook、第二次却多走一个，直接抛
   // 「Rendered more hooks than during the previous render」，整页白屏。
   const { note, page } = usePaperTheme()
+
+  const reviewRequest: GenerationReviewRequest | null = useMemo(
+    () => parseGenerationReview(trip?.genReview),
+    [trip?.genReview],
+  )
 
   // --- 当天的派生数据 -----------------------------------------------------------
 
@@ -559,6 +622,80 @@ export default function TripDetail() {
     }
   }
 
+  /** 从当前行程复制基础配置，再在新行程上开始生成，保留原日期与打卡数据。 */
+  async function replanFromCopy() {
+    if (!trip) return
+    setReplanning(true)
+    try {
+      const draftId = await createReplanDraft(trip.id)
+      await api.post(`/trips/${draftId}/generate`, { mode: 'continue', parallel: false })
+      message.success('已创建新的规划副本，正在生成')
+      navigate(`/trips/${draftId}`)
+    } catch (err) {
+      message.error(extractError(err, '创建重新规划副本失败，原行程未修改'))
+    } finally {
+      setReplanning(false)
+    }
+  }
+
+  /** partial/failed 的安全补缺入口，始终作用于当前行程，不创建副本。 */
+  async function continueMissingDays() {
+    if (!trip) return
+    setContinuing(true)
+    try {
+      await api.post(`/trips/${trip.id}/generate`, { mode: 'continue', parallel: false })
+      message.info('已开始补齐缺失日期，已保存内容会继续保留')
+      await loadTrip()
+    } catch (err) {
+      message.error(extractError(err, '补齐请求未能开始'))
+    } finally {
+      setContinuing(false)
+    }
+  }
+
+  /** 取消 waiting/recovery，保留已落库日期与打卡数据后回到可补缺状态。 */
+  async function cancelCurrentGeneration() {
+    if (!trip) return
+    setCancellingGeneration(true)
+    try {
+      await cancelGeneration(trip.id)
+      setReviewFeedback('')
+      await loadTrip()
+      message.success('已取消未确认方案，可继续补齐缺失日期')
+    } catch (err) {
+      message.error(extractError(err, '当前生成仍在执行，请稍候再试'))
+    } finally {
+      setCancellingGeneration(false)
+    }
+  }
+
+  /** 详情页刷新后直接提交当前 reviewId，迟到点击不会裁决下一张卡。 */
+  async function confirmReview(answer: { decision: 'approve' | 'choose' | 'reject'; choice?: 'A' | 'B' }) {
+    if (!trip) return
+    if (trip.genRunPhase !== 'waiting' || !reviewRequest || !trip.genReviewId) {
+      message.warning('待确认方案已变化，请刷新后重新选择')
+      await loadTrip()
+      return
+    }
+    setReviewConfirming(true)
+    try {
+      await api.post(`/trips/${trip.id}/review-confirm`, {
+        decision: answer.decision,
+        choice: answer.choice,
+        feedback: answer.decision === 'reject' ? reviewFeedback.trim() || undefined : undefined,
+        reviewId: trip.genReviewId,
+      })
+      setReviewFeedback('')
+      message.success('已提交裁决，生成将继续')
+      await loadTrip()
+    } catch (err) {
+      message.error(extractError(err, '裁决未能提交，请刷新后重试'))
+      await loadTrip()
+    } finally {
+      setReviewConfirming(false)
+    }
+  }
+
   /** 就地更新某条目，避免整页重新拉取 */
   function patchItem(itemId: string, patch: Partial<TripItemData>) {
     setTrip((prev) => {
@@ -708,6 +845,19 @@ export default function TripDetail() {
   const dayItems = day?.items ?? []
   const checkedCount = dayItems.filter((item) => item.checkedAt).length
   const groups = groupBySlot(dayItems)
+  const completedDayCount = getCompletedDayCount(trip)
+  const missingDayIndexes = getMissingDayIndexes(trip)
+  const missingDaysText = missingDayIndexes.map((index) => `第 ${index} 天`).join('、')
+  const commitPending = trip.genRunPhase === 'commit_pending'
+  // partial/failed 都表示当前没有正在执行的模型任务；即使服务端已经落库
+  // 了全部日期，也要保留幂等 continue 入口，让后端完成最后的收尾状态推进。
+  const canContinue = trip.status === 'partial' || trip.status === 'failed'
+  const continueLabel = commitPending
+    ? '重试保存已生成安排'
+    : missingDayIndexes.length > 0
+      ? `继续补齐${missingDaysText}`
+      : '核对并完成行程'
+  const canReplan = completedDayCount > 0
 
   // 便利贴的墨色与序号在文件上方定义（那里是 hook 区）。
   // 这里只用它们，不再声明任何 hook —— 本行以下都在提前 return 之后。
@@ -729,7 +879,17 @@ export default function TripDetail() {
                 {trip.title}
               </Typography.Title>
               {trip.status === 'ready' && <Tag color="success">已完成</Tag>}
-              {trip.status === 'generating' && <Tag color="processing">生成中</Tag>}
+              {trip.status === 'generating' && (
+                <Tag color={trip.genRunPhase === 'waiting' || trip.genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
+                  {trip.genRunPhase === 'waiting'
+                    ? '等待确认'
+                    : trip.genRunPhase === 'recovery'
+                      ? '需要恢复'
+                      : commitPending
+                        ? '保存待重试'
+                      : '生成中'}
+                </Tag>
+              )}
               {/* partial：整趟没排完（有跳过的天）。用 warning 而不是 error，
                   因为大部分天是好的，用户只需补齐缺失的部分（报告 A08） */}
               {trip.status === 'partial' && <Tag color="warning">部分完成</Tag>}
@@ -744,18 +904,50 @@ export default function TripDetail() {
               </Typography.Text>
             </div>
           </div>
-          <Button onClick={() => navigate('/trips')}>返回列表</Button>
+          <Space wrap>
+            {canReplan && trip.status !== 'generating' && (
+              <Button loading={replanning} onClick={() => void replanFromCopy()}>
+                新建副本重新规划
+              </Button>
+            )}
+            <Button onClick={() => navigate('/trips')}>返回列表</Button>
+          </Space>
         </Space>
 
         {trip.status === 'generating' && (
           <Alert
             style={{ marginTop: 12 }}
-            type="info"
+            type={trip.genRunPhase === 'recovery' ? 'warning' : 'info'}
             showIcon
-            title={`AI 正在排程：${trip.genProgress || '准备中'}${
-              trip.genDayIndex ? `（已完成 ${trip.genDayIndex}/${trip.days} 天）` : ''
-            }`}
-            description="排好的天会实时出现在下方，生成完成前打卡按钮暂时关闭。"
+            title={
+              trip.genRunPhase === 'waiting'
+                ? reviewRequest
+                  ? `等待你确认第 ${reviewRequest.dayIndex} 天的方案`
+                  : '有待确认内容需要处理'
+                : trip.genRunPhase === 'recovery'
+                  ? '这次确认需要人工恢复'
+                  : commitPending
+                    ? '安排已生成，保存未成功'
+                  : `AI 正在排程：${trip.genProgress || '准备中'}`
+            }
+            description={
+              trip.genRunPhase === 'recovery'
+                ? '原有候选方案会保留；取消后可根据已落库日期安全补缺。'
+                : commitPending
+                  ? '服务端正在等待安全的保存重试，请稍后刷新；不要重新规划以免重复调用模型。'
+                : `已完成 ${completedDayCount}/${trip.days} 天。排好的天会实时出现在下方，生成完成前打卡按钮暂时关闭。`
+            }
+            action={
+              (trip.genRunPhase === 'recovery' || (trip.genRunPhase === 'waiting' && !reviewRequest)) && (
+                <Button
+                  size="small"
+                  loading={cancellingGeneration}
+                  onClick={() => void cancelCurrentGeneration()}
+                >
+                  {trip.genRunPhase === 'recovery' ? '取消并安全补缺' : '取消未确认方案'}
+                </Button>
+              )
+            }
           />
         )}
         {trip.status === 'failed' && (
@@ -763,8 +955,29 @@ export default function TripDetail() {
             style={{ marginTop: 12 }}
             type="warning"
             showIcon
-            title="这次生成没有完成"
-            description={trip.genError ?? '生成失败，已排好的天不受影响。可回到新建流程重新触发。'}
+            title={commitPending ? '安排已生成，保存未成功' : '这次生成没有完成'}
+            description={
+              <Space direction="vertical" size={8}>
+                <span>
+                  {trip.genError ?? (commitPending ? '已保存本次模型结果，可以安全重试保存。' : '生成失败，已排好的天不受影响。')}
+                  {commitPending
+                    ? ' 点击下面按钮只会重试保存已生成安排，不会再次调用模型。'
+                    : missingDayIndexes.length === 0
+                      ? ' 可以点击下面按钮核对并完成行程状态。'
+                      : ''}
+                </span>
+                {canContinue && (
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={continuing}
+                    onClick={() => void continueMissingDays()}
+                  >
+                    {continueLabel}
+                  </Button>
+                )}
+              </Space>
+            }
           />
         )}
         {/* partial：部分天没排出来。与 failed 的差别是「大部分是好的」，
@@ -776,8 +989,183 @@ export default function TripDetail() {
             showIcon
             title="行程只排好了一部分"
             description={
-              trip.genError ??
-              `共 ${trip.days} 天，实际排好了 ${trip.tripDays.length} 天。缺失的天可回到新建流程点「继续生成」补齐。`
+              <Space direction="vertical" size={8}>
+                <span>
+                  {trip.genError ? `${trip.genError}。` : ''}
+                  已完成 {completedDayCount}/{trip.days} 天
+                  {missingDayIndexes.length > 0 ? `，待补齐${missingDaysText}` : '，没有缺失日期，可核对并完成行程'}。
+                </span>
+                {canContinue && (
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={continuing}
+                    data-testid="trip-detail-continue-btn"
+                    onClick={() => void continueMissingDays()}
+                  >
+                    {continueLabel}
+                  </Button>
+                )}
+              </Space>
+            }
+          />
+        )}
+        {trip.status === 'generating' && trip.genRunPhase === 'waiting' && reviewRequest && (
+          <div
+            data-testid="trip-detail-review-card"
+            style={{
+              marginTop: 12,
+              padding: '14px 16px',
+              borderRadius: 8,
+              border: `1px solid ${token.colorWarningBorder}`,
+              borderLeft: `3px solid ${token.colorWarning}`,
+              background: token.colorWarningBg,
+            }}
+          >
+            <Typography.Text strong>
+              {reviewRequest.kind === 'choose'
+                ? `第 ${reviewRequest.dayIndex}/${reviewRequest.totalDays} 天：请选择一个方案`
+                : `第 ${reviewRequest.dayIndex}/${reviewRequest.totalDays} 天已排好，等待你的确认`}
+            </Typography.Text>
+            {reviewRequest.kind === 'confirm' && reviewRequest.summary && (
+              <Typography.Paragraph style={{ margin: '8px 0' }}>
+                {reviewRequest.summary}
+              </Typography.Paragraph>
+            )}
+            {reviewRequest.kind === 'choose' && reviewRequest.candidates && (
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                  gap: 10,
+                  margin: '10px 0',
+                }}
+              >
+                {reviewRequest.candidates.map((candidate) => (
+                  <div
+                    key={candidate.label}
+                    data-testid={`trip-detail-review-candidate-${candidate.label}`}
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: 6,
+                      border: `1px solid ${token.colorBorder}`,
+                      background: token.colorBgContainer,
+                    }}
+                  >
+                    <Space size={8} style={{ marginBottom: 6 }}>
+                      <Tag color="blue">方案 {candidate.label}</Tag>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        评分均值 {candidate.ratingAvg} 分 · {candidate.spotCount} 个景点
+                      </Typography.Text>
+                    </Space>
+                    <div style={{ fontSize: 12, color: token.colorTextSecondary, marginBottom: 6 }}>
+                      🚗 驾车约 {candidate.commuteMinutes === null ? '未知' : `${candidate.commuteMinutes} 分钟`}
+                      {' · '}🚇 公交约 {candidate.transitMinutes === null ? '未知' : `${candidate.transitMinutes} 分钟`}
+                    </div>
+                    <Typography.Paragraph style={{ marginBottom: 8, fontSize: 13 }}>
+                      {candidate.summary}
+                    </Typography.Paragraph>
+                    {candidate.pros.map((pros) => (
+                      <div key={pros} style={{ color: token.colorSuccess, fontSize: 12.5 }}>
+                        ＋ {pros}
+                      </div>
+                    ))}
+                    {candidate.cons.map((cons) => (
+                      <div key={cons} style={{ color: token.colorWarning, fontSize: 12.5 }}>
+                        － {cons}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+            <Input.TextArea
+              rows={2}
+              maxLength={500}
+              value={reviewFeedback}
+              onChange={(event) => setReviewFeedback(event.target.value)}
+              placeholder="不满意？写下修改意见（可选）"
+              style={{ marginBottom: 10 }}
+            />
+            <Space wrap>
+              {reviewRequest.kind === 'confirm' ? (
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={reviewConfirming}
+                  data-testid="trip-detail-review-confirm-btn"
+                  onClick={() => void confirmReview({ decision: 'approve' })}
+                >
+                  确认采用
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={reviewConfirming}
+                    data-testid="trip-detail-review-choose-a-btn"
+                    onClick={() => void confirmReview({ decision: 'choose', choice: 'A' })}
+                  >
+                    采用方案 A
+                  </Button>
+                  <Button
+                    size="small"
+                    loading={reviewConfirming}
+                    data-testid="trip-detail-review-choose-b-btn"
+                    onClick={() => void confirmReview({ decision: 'choose', choice: 'B' })}
+                  >
+                    采用方案 B
+                  </Button>
+                </>
+              )}
+              <Button
+                size="small"
+                loading={reviewConfirming}
+                data-testid="trip-detail-review-reject-btn"
+                onClick={() => void confirmReview({ decision: 'reject' })}
+              >
+                按意见重排
+              </Button>
+              <Popconfirm
+                title="取消这次未确认方案？"
+                description="已落库日期和打卡数据会保留，之后可以安全补齐缺失日期。"
+                okText="取消并补缺"
+                cancelText="继续等待"
+                onConfirm={() => void cancelCurrentGeneration()}
+              >
+                <Button size="small" loading={cancellingGeneration} data-testid="trip-detail-review-cancel-btn">
+                  取消未确认方案
+                </Button>
+              </Popconfirm>
+            </Space>
+          </div>
+        )}
+        {trip.status === 'generating' && trip.genRunPhase === 'waiting' && !reviewRequest && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="warning"
+            showIcon
+            title="待确认内容暂时无法读取"
+            description="请刷新后重试；如果仍无法恢复，可取消未确认方案，保留已落库日期后安全补缺。"
+            action={
+              <Button size="small" loading={cancellingGeneration} onClick={() => void cancelCurrentGeneration()}>
+                取消并安全补缺
+              </Button>
+            }
+          />
+        )}
+        {trip.status === 'generating' && trip.genRunPhase === 'recovery' && (
+          <Alert
+            style={{ marginTop: 12 }}
+            type="warning"
+            showIcon
+            title="这次确认需要人工恢复"
+            description={trip.genError ?? '取消后会保留已落库日期和打卡数据，再从缺失日期安全补齐。'}
+            action={
+              <Button size="small" loading={cancellingGeneration} onClick={() => void cancelCurrentGeneration()}>
+                取消并安全补缺
+              </Button>
             }
           />
         )}
