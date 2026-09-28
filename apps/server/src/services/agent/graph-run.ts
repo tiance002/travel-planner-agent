@@ -141,12 +141,22 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
       } })
       return
     }
+    // A journal write can fail before any model result reaches durable
+    // storage.  Keep this distinct from the valid pending branch above:
+    // callers must not be told that a result can be retried without another
+    // model call when there is no payload to replay.
+    if (error instanceof DayCommitError) {
+      await prisma.trip.updateMany({ where: { id: tripId, genRunId: runId }, data: {
+        status: 'failed', genRunPhase: null,
+        genError: `${message}。本次模型结果未持久保存，已有日期保留，请人工补缺或重新生成`,
+        genProgress: null, genReview: null, genReviewId: null,
+      } })
+      return
+    }
     // resume 失败后 checkpoint 可能已执行部分节点，不假装可以再次自动resume；保留载荷与checkpoint供排查。
     await prisma.trip.updateMany({ where: { id: tripId, genRunId: runId }, data: recovering
       ? { genRunPhase: 'recovery', genError: `确认执行中断：${message}。请取消未确认方案后安全补缺`, genProgress: null }
-      : error instanceof DayCommitError
-        ? { status: 'failed', genRunPhase: 'commit_pending', genError: `${message}。已保存本次模型结果，请继续生成以完成提交，不会再次调用模型`, genProgress: null }
-        : { status: 'failed', genError: message, genProgress: null, genReview: null, genReviewId: null } })
+      : { status: 'failed', genError: message, genProgress: null, genReview: null, genReviewId: null } })
   }
   async function generateTripWithGraph(tripId: string, options: GenerateOptions = {}) {
     const runId = options.runId
@@ -293,6 +303,10 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
         const after = await prisma.trip.findUnique({ where: { id: tripId }, select: { genRunId: true, genRunPhase: true, genReview: true, genRunConfig: true } })
         if (after?.genRunId === runId && after.genRunPhase === 'commit_pending' &&
           (parsePendingCommit(after.genReview) ?? parsePendingCommitConfig(after.genRunConfig))) recovery = false
+        // A journal failure has no safe payload to preserve.  `fail` clears
+        // the phase and review fields, so release this owner just like the
+        // generate path; only checkpoint/review failures stay manual recovery.
+        else if (error instanceof DayCommitError && after?.genRunId === runId && after.genRunPhase === null) recovery = false
       }
       throw error
     }

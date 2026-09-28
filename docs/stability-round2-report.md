@@ -5,8 +5,8 @@
 ## 1. 修复映射
 
 - `apps/server/src/services/agent/run-lock.ts`：用户级唯一运行锁、stale 心跳接管、`waiting/reviewing/recovery/commit_pending` 阶段、损坏 journal 降级和安全取消。
-- `apps/server/src/services/agent/graph-run.ts`：真实 `buildAgentGraph` 运行时、`${tripId}:${runId}` checkpoint 线程、条件写 fencing、pending journal 无模型重试、warnings 和配置的事务清理、完整行程零模型短路。
-- `apps/server/src/services/agent/graph.ts`：自动与人工提交共享 commit journal，累计 warnings 保序去重，完整行程从 `START` 直接 finalize，避免第 N+1 天和未解析住宿触发模型。
+- `apps/server/src/services/agent/graph-run.ts`：真实 `buildAgentGraph` 运行时、`${tripId}:${runId}` checkpoint 线程、条件写 fencing、pending journal 无模型重试、无 journal 时的真实失败降级、warnings 和配置的事务清理、完整行程零模型短路。
+- `apps/server/src/services/agent/graph.ts`：自动与人工提交共享 commit journal，自动 journal 写入失败在通用重试前转为 `DayCommitError`，累计 warnings 保序去重，完整行程从 `START` 直接 finalize，避免第 N+1 天和未解析住宿触发模型。
 - `apps/server/src/routes/trips.ts`：领取后异常释放、reviewId 必填、restart 保存数据保护、`replan-copy` 安全重规划入口、cancel-generation 对静止 pending/recovery 的处理。
 - `apps/server/prisma/migrations/20260928090000_run_lifecycle/migration.sql`：旧 review、孤立 review 和重复活动锁的迁移规则。
 - `apps/server/src/config.ts`、`apps/server/src/index.ts`、`apps/server/scripts/check-proxy.ts`、`apps/server/.env.example`：默认不信任代理、数字 hop、CIDR/loopback 与真实 Express 限流验证。
@@ -26,11 +26,11 @@
 以下命令均在当前工作树执行，常规回归使用临时 SQLite，不读取或修改开发库：
 
 - `npm run typecheck`：server 和 web 均通过，exit 0。
-- `npm test`：SSRF/限流 51/51、run-lock 20/20、agent 19/19、parser 14/14、scheduler 规则 9/9 与选点质量 65/65、graph 19/19、lifecycle 133/133、proxy、migration、replan 均通过，exit 0。
+- `npm test`：SSRF/限流 51/51、run-lock 20/20、agent 19/19、parser 14/14、scheduler 规则 9/9 与选点质量 65/65、graph 19/19、lifecycle 145/145、proxy、migration、replan 均通过，exit 0。
 - `npm run build`：server `tsc` 与 web `vite build` 均通过，exit 0；Vite 仅报告现有大 chunk warning。
-- `npm run ci`：首次测试子进程在 run-lock 已打印 20/20 后出现 Windows 原生退出码 `3221225477`，没有断言失败；立即完整重跑通过（exit 0），lifecycle 133/133。
-- 前端完成态文案修正后的最终 `npm run ci`：exit 0；完整 stdout/stderr 在 `.planning/stability-round2/final-ci.log`，独立退出码记录在 `.planning/stability-round2/final-ci.exitcode`（值为 `0`）。该轮仍为 SSRF/限流 51/51、run-lock 20/20、agent 19/19、parser 14/14、scheduler 9/9 与质量 65/65、graph 19/19、lifecycle 133/133、proxy/migration/replan 通过；日志只作本地证据，不纳入提交。
-- `node tools/test-isolated.mjs npm run check:lifecycle`：最新独立日志 133/133，含 HTTP 并发、stale 接管、review CAS、warnings、restart/replan、pending 提交重试、损坏 journal recovery/cancel 和真实 child process checkpoint 恢复。
+- `npm run ci`：首次测试子进程在 agent 已打印 19/19 后出现 Windows 原生退出码 `3221225477`，没有断言失败；立即完整重跑通过（exit 0），lifecycle 145/145。
+- 前端完成态文案及 P1 journal 失败边界修正后的最终 `npm run ci`：exit 0；完整 stdout/stderr 在 `.planning/stability-round2/final-ci.log`，独立退出码记录在 `.planning/stability-round2/final-ci-exitcode.log`（值为 `0`）。该轮为 SSRF/限流 51/51、run-lock 20/20、agent 19/19、parser 14/14、scheduler 9/9 与质量 65/65、graph 19/19、lifecycle 145/145、proxy/migration/replan 通过；日志只作本地证据，不纳入提交。
+- `node tools/test-isolated.mjs npm exec -w @travel/server -- tsx scripts/check-lifecycle.ts`：P1 修复前的真实 HTTP journal 故障回归为 141/145（模型重复调用、partial 终态和错误恢复次数暴露缺陷）；修复后最终 145/145 由同一套件在 `npm run ci` 的 `check:lifecycle` 阶段实际通过，覆盖 HTTP 并发、stale 接管、review CAS、warnings、restart/replan、pending 提交重试、journal 写入失败单模型调用后 truthful failed、损坏 journal recovery/cancel 和真实 child process checkpoint 恢复。
 - `node tools/test-isolated.mjs npm run check:proxy`：真实 Express fetch，默认不信任伪造 XFF，`1` hop、CIDR/loopback 通过。
 - `node tools/test-isolated.mjs npm run check:migration`：空库 10 个 migration、旧 9 migration review/check-in、孤立 review、重复活动锁均通过；Windows 原生 SQLite 失败 DDL 后可能留下临时 fixture 文件句柄清理警告，验收本身 exit 0。
 - `node tools/test-isolated.mjs npm run check:replan`：restart 409、原日期/打卡保留、副本独立生成通过。
@@ -41,7 +41,7 @@
 
 ## 4. 生产 Graph/checkpoint 范围
 
-生产路由使用真实 `buildAgentGraph`、真实 `SqliteSaver` 和线程 `${tripId}:${runId}`。lifecycle 同时覆盖关闭 runtime 后用同一 checkpoint 文件创建新 runtime，以及独立 child process 关闭/重启后恢复人工裁决并以 exit 0 完成；普通崩溃从数据库事实补缺，人工 interrupt 才从持久 checkpoint 继续。pending journal 重试是数据库提交重试，不是 checkpoint 节点重放。多实例部署仍未在本轮验证。
+生产路由使用真实 `buildAgentGraph`、真实 `SqliteSaver` 和线程 `${tripId}:${runId}`。lifecycle 同时覆盖关闭 runtime 后用同一 checkpoint 文件创建新 runtime，以及独立 child process 关闭/重启后恢复人工裁决并以 exit 0 完成；普通崩溃从数据库事实补缺，人工 interrupt 才从持久 checkpoint 继续。pending journal 重试是数据库提交重试，不是 checkpoint 节点重放。若 journal 写入本身失败，图在自动天级重试前停止，任务进入 failed 并释放运行锁；错误明确说明模型结果未持久保存，已有日期/打卡保留，后续需要人工补缺或重新生成。多实例部署仍未在本轮验证。
 
 ## 5. 迁移和开发库摘要
 

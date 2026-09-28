@@ -890,6 +890,55 @@ async function testCommitFailureDoesNotReinvokeBeforeRetry(): Promise<void> {
   }
 }
 
+async function testPendingJournalWriteFailureDoesNotRetryModel(): Promise<void> {
+  console.log('\n--- P1：pending journal 写入失败不重调模型、不伪称已保存 ---')
+  const user = await makeUser('pending-journal-write-failure')
+  const trip = await makeTrip(user.id, 2, 'pending-journal-write-failure')
+  await seedDay(trip.id, 1, '已有第1天', { checked: true, poiId: 'PENDING-JOURNAL-OLD-1' })
+  const first = makeRuntime({ tag: 'pending-journal-write-failure' })
+  const trigger = `lifecycle_fail_pending_journal_${randomUUID().replaceAll('-', '')}`
+  // Fail only the journal transition.  The trigger does not touch TripDay or
+  // genDayIndex, so a successful implementation must stop before any new day
+  // or progress is committed and must distinguish this ordinary DB failure
+  // from a durable commit_pending handoff.
+  await prisma.$executeRawUnsafe(`CREATE TRIGGER "${trigger}" BEFORE UPDATE OF genRunPhase ON "Trip" WHEN NEW.id = '${trip.id}' AND NEW.genRunPhase = 'commit_pending' BEGIN SELECT RAISE(ABORT, 'forced pending journal write failure'); END`)
+  let triggerActive = true
+  const http = await serve(first.runtime, user.token)
+  try {
+    const before = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, include: { tripDays: { include: { items: true } } } })
+    const start = await http.request(`/api/trips/${trip.id}/generate`, { method: 'POST', body: JSON.stringify({ mode: 'continue' }) })
+    check('pending journal 写入故障首个 HTTP 请求返回 202', start.status, 202)
+    // Current production may incorrectly retry the model and end in partial;
+    // wait for either terminal shape so the assertions expose that regression
+    // without racing the background task or dropping the trigger too early.
+    await waitFor('pending journal 写入故障终止并释放锁', async () => {
+      const row = await prisma.trip.findUnique({ where: { id: trip.id }, select: { status: true, genRunId: true } })
+      return ['failed', 'partial'].includes(row?.status ?? '') && row?.genRunId === null
+    })
+    const failed = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, include: { tripDays: { include: { items: true }, orderBy: { dayIndex: 'asc' } } } })
+    check('journal 写入失败只调用一次模型', first.calls(), 1)
+    check('journal 写入失败终态为 failed', failed.status, 'failed')
+    check('journal 写入失败释放 run/activeUser', [failed.genRunId, failed.genActiveUserId], [null, null])
+    check('journal 写入失败不留下可重放 journal', [failed.genReview, failed.genRunPhase], [null, null])
+    check('journal 写入失败不伪称模型结果已保存', /已保存|不会再次调用模型/.test(failed.genError ?? ''), false)
+    check('journal 写入失败提示需人工/重新补缺', /人工|补缺|未保存|未持久/.test(failed.genError ?? ''), true)
+    check('journal 写入失败不提交新日期/进度', [failed.tripDays.map(day => day.dayIndex), failed.genDayIndex, failed.genProgress], [[1], null, null])
+    check('journal 写入失败保留已有日期与 checkin', [failed.tripDays[0]?.summary, failed.tripDays[0]?.items[0]?.checkedAt], [before.tripDays[0]?.summary, before.tripDays[0]?.items[0]?.checkedAt])
+
+    await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${trigger}"`)
+    triggerActive = false
+    const retry = await http.request(`/api/trips/${trip.id}/generate`, { method: 'POST', body: JSON.stringify({ mode: 'continue' }) })
+    check('解除 journal 故障后显式补缺返回 202', retry.status, 202)
+    await waitFor('解除 journal 故障后重新模型补缺完成', async () => (await prisma.trip.findUnique({ where: { id: trip.id }, select: { status: true, genRunId: true } }))?.status === 'ready')
+    const after = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, include: { tripDays: { include: { items: true }, orderBy: { dayIndex: 'asc' } } } })
+    check('解除故障后是显式重新模型补缺而非 journal 重放', first.calls(), 2)
+    check('解除故障后补齐缺失日期且保留原 checkin', [after.tripDays.map(day => day.dayIndex), after.tripDays[0]?.items[0]?.checkedAt], [[1, 2], before.tripDays[0]?.items[0]?.checkedAt])
+  } finally {
+    if (triggerActive) await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${trigger}"`)
+    await closeServer(http.server)
+  }
+}
+
 async function testInteractiveCommitFailureJournalsChosenCandidate(): Promise<void> {
   console.log('\n--- P1：approve 提交失败保存具体候选，HTTP 重试不换方案/不重调模型 ---')
   const user = await makeUser('interactive-commit-failure')
@@ -1128,6 +1177,7 @@ async function run(): Promise<void> {
     await testAllFailuresPartialThenFillClearsMissingWarning()
     await testWarningsFiveDays()
     await testCommitFailureDoesNotReinvokeBeforeRetry()
+    await testPendingJournalWriteFailureDoesNotRetryModel()
     await testInteractiveCommitFailureJournalsChosenCandidate()
     await testMalformedCommitPendingIsRecoveryOnly()
     await testReviewIdRequiredAndStaleIdRejected()

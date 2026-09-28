@@ -124,7 +124,7 @@ review 是生成中的等待阶段，不是错误，必须暂停“还在自动�
 
 partial 的进度以实际已保存日数表示，已保存内容可查看；缺失日序使用服务端派生值，不把「完成数+1」当成缺失日索引。统一 warning 表示部分完成，failed 才使用 error。列表、生成页、详情状态文案一致；详情和新建页都提供作用于原行程 ID 的真实补齐按钮，即使 0 天已落库或缺失日为空也保留入口，后端以幂等 continue 完成最终收尾。`commit_pending` 代表模型结果已保存但日期提交尚未完成，继续操作只重试保存，不重新调用模型。已有日期的重新规划会走新草稿，避免后端 restart 保护触发后让用户失去可用操作。
 
-P1-5 验收重点：从列表打开 partial 行程后可以在原行程上触发补齐；不要求用户重新填表，不丢失已有安排或打卡。生成页与详情的状态说明和操作位于同一处。重新规划通过新草稿保留原行程，风险说明来自真实后端行为，不能用视觉样式暗示已保存内容一定保留。本轮已用隔离本机 fixture 验证 4/5 缺第 2 天、0/5、waiting review（approve/choose 带 reviewId）、recovery 取消、missing 为空时的收尾按钮、`commit_pending` 保存重试、副本切换旧响应保护，以及 ready 3/3 的完成文案与 100% 进度。execute 另用独立临时数据库和临时账号完成真实 API 的 review waiting→reject/replan→partial→continue→ready 链，并完成 77/77 的真实浏览器 smoke；这些证据不涉及开发库原用户。完整视觉改版仍未实施。
+P1-5 验收重点：从列表打开 partial 行程后可以在原行程上触发补齐；不要求用户重新填表，不丢失已有安排或打卡。生成页与详情的状态说明和操作位于同一处。重新规划通过新草稿保留原行程，风险说明来自真实后端行为，不能用视觉样式暗示已保存内容一定保留。本轮已用隔离本机 fixture 验证 4/5 缺第 2 天、0/5、waiting review（approve/choose 带 reviewId）、recovery 取消、missing 为空时的收尾按钮、`commit_pending` 保存重试和副本切换旧响应保护；另对 ready 3/3 的完成文案、成功进度状态和 100% 计算完成源码核验。execute 另用独立临时数据库和临时账号完成真实 API 的 review waiting→reject/replan→partial→continue→ready 链，并完成 77/77 的真实浏览器 smoke；这些证据不涉及开发库原用户。完整视觉改版仍未实施。
 
 ## 实施阶段
 

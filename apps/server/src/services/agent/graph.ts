@@ -697,7 +697,15 @@ export function buildAgentGraph(ctx: AgentGraphContext, checkpointer?: BaseCheck
           )
         }
         const accumulatedWarnings = dedupeWarnings([...state.warnings, ...chosen.warnings])
-        await ctx.persistPendingDay?.(chosen.day, accumulatedWarnings, state.totalDays)
+        try {
+          await ctx.persistPendingDay?.(chosen.day, accumulatedWarnings, state.totalDays)
+        } catch (error) {
+          // The model result is not safe to retry unless the journal made it
+          // to the database.  Stop the graph before its generic day retry can
+          // invoke the model again; a later run may safely regenerate the gap.
+          if (error instanceof RunLostError) throw error
+          throw new DayCommitError(error instanceof Error ? error.message : String(error))
+        }
         return {
           pendingDay: {
             day: chosen.day,
