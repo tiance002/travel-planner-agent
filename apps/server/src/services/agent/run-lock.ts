@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { prisma } from '../../db'
 import type { Prisma } from '../../generated/prisma/client'
-import { isPendingCommitShape } from './pending-commit'
+import { parsePendingCommitJournal } from './pending-commit'
 
 export const HEARTBEAT_TTL_MS = 90_000
 export const HEARTBEAT_INTERVAL_MS = 20_000
@@ -28,12 +28,10 @@ export async function acquireRun(tripId: string, userId: string): Promise<Acquir
         data: { genRunId: null, genActiveUserId: null, genHeartbeatAt: null, genRunStartedAt: null },
       })
       const pendingRows = await tx.trip.findMany({
-        where: { userId, genRunId: null, genRunPhase: 'commit_pending', genReview: { not: null } },
-        select: { id: true, genReview: true },
+        where: { userId, genRunId: null, genRunPhase: 'commit_pending' },
+        select: { id: true, genReview: true, genRunConfig: true },
       })
-      const corruptPendingIds = pendingRows.filter(row => {
-        try { return !isPendingCommitShape(JSON.parse(row.genReview!)) } catch { return true }
-      }).map(row => row.id)
+      const corruptPendingIds = pendingRows.filter(row => !parsePendingCommitJournal(row.genReview, row.genRunConfig)).map(row => row.id)
       if (corruptPendingIds.length) {
         await tx.trip.updateMany({
           where: { id: { in: corruptPendingIds }, userId, genRunPhase: 'commit_pending', genRunId: null },
@@ -70,11 +68,9 @@ export async function acquireRun(tripId: string, userId: string): Promise<Acquir
       // A failed automatic commit leaves a model result in genReview with a
       // commit_pending phase.  Valid payloads were made reclaimable above;
       // this branch claims that exact pending value and never starts a model.
-      const target = await tx.trip.findUnique({ where: { id: tripId }, select: { genRunId: true, genRunPhase: true, genReview: true } })
-      let pendingCommit = false
-      if (target?.genRunId === null && target.genRunPhase === 'commit_pending' && target.genReview) {
-        try { pendingCommit = isPendingCommitShape(JSON.parse(target.genReview)) } catch { pendingCommit = false }
-      }
+      const target = await tx.trip.findUnique({ where: { id: tripId }, select: { genRunId: true, genRunPhase: true, genReview: true, genRunConfig: true } })
+      const pendingCommit = target?.genRunId === null && target.genRunPhase === 'commit_pending' &&
+        !!parsePendingCommitJournal(target.genReview, target.genRunConfig)
       if (pendingCommit) {
         const pendingResult = await tx.trip.updateMany({
           where: { id: tripId, userId, genRunId: null, genRunPhase: 'commit_pending' },
@@ -83,7 +79,8 @@ export async function acquireRun(tripId: string, userId: string): Promise<Acquir
         if (pendingResult.count) return { ok: true as const, runId }
       }
       const result = await tx.trip.updateMany({
-        where: { id: tripId, userId, genRunId: null, genReview: null },
+        where: { id: tripId, userId, genRunId: null, genReview: null,
+          OR: [{ genRunPhase: null }, { genRunPhase: { notIn: ['commit_pending', 'recovery', 'waiting'] } }] },
         data: { genRunId: runId, genActiveUserId: userId, genRunPhase: 'running', genHeartbeatAt: now, genRunStartedAt: now },
       })
       return result.count ? { ok: true as const, runId } : { ok: false as const, reason: 'trip_busy' as const }
@@ -101,13 +98,9 @@ export async function releaseRun(tripId: string, runId: string): Promise<void> {
   // Keep a durable automatic-commit handoff available after the worker exits.
   // The payload is internal and only reclaimable by acquireRun for this same
   // trip/user; all ordinary runs still clear their phase as before.
-  const current = await prisma.trip.findUnique({ where: { id: tripId }, select: { genRunPhase: true, genReview: true } })
+  const current = await prisma.trip.findUnique({ where: { id: tripId }, select: { genRunPhase: true, genReview: true, genRunConfig: true } })
   let phase: string | null = null
-  if (current?.genRunPhase === 'commit_pending' && current.genReview) {
-    try {
-      phase = isPendingCommitShape(JSON.parse(current.genReview)) ? 'commit_pending' : 'recovery'
-    } catch { phase = 'recovery' }
-  }
+  if (current?.genRunPhase === 'commit_pending') phase = parsePendingCommitJournal(current.genReview, current.genRunConfig) ? 'commit_pending' : 'recovery'
   await prisma.trip.updateMany({ where: { id: tripId, genRunId: runId },
     data: { genRunId: null, genActiveUserId: null, genRunPhase: phase, genHeartbeatAt: null, genRunStartedAt: null } })
 }
@@ -141,4 +134,52 @@ export async function cancelSuspendedRun(tripId: string, userId: string): Promis
       genProgress: null, genError: '已取消未确认方案，可从已保存的日期安全补缺' },
   })
   return result.count > 0
+}
+
+/**
+ * Explicit, authenticated recovery check used by the detail page.  It is
+ * intentionally separate from GET /trips/:id: reading a page must not mutate
+ * ownership.  Only a stale running/reviewing owner is moved to recovery;
+ * waiting remains a valid human decision state and active work is untouched.
+ */
+export async function recoverStaleRun(tripId: string, userId: string): Promise<{
+  status: 'active' | 'waiting' | 'recovery' | 'commit_pending' | 'idle'
+  changed: boolean
+  found: boolean
+}> {
+  const now = new Date()
+  const stale = new Date(now.getTime() - HEARTBEAT_TTL_MS)
+  return prisma.$transaction(async tx => {
+    const trip = await tx.trip.findFirst({ where: { id: tripId, userId },
+      select: { status: true, genRunId: true, genRunPhase: true, genReview: true, genRunConfig: true, genHeartbeatAt: true } })
+    if (!trip) return { status: 'idle' as const, changed: false, found: false }
+    if (trip.genRunPhase === 'waiting') return { status: 'waiting' as const, changed: false, found: true }
+    if (trip.genRunPhase === 'commit_pending') {
+      if (trip.genRunId && trip.genHeartbeatAt && trip.genHeartbeatAt >= stale) return { status: 'active' as const, changed: false, found: true }
+      if (parsePendingCommitJournal(trip.genReview, trip.genRunConfig)) {
+        if (trip.genRunId) {
+          const changed = await tx.trip.updateMany({ where: { id: tripId, userId, genRunId: trip.genRunId,
+            genRunPhase: 'commit_pending', OR: [{ genHeartbeatAt: null }, { genHeartbeatAt: { lt: stale } }] },
+          data: { genRunId: null, genActiveUserId: null, genHeartbeatAt: null, genRunStartedAt: null,
+            status: 'failed', genProgress: null, genError: '已生成的安排等待保存，请重试保存' } })
+          return { status: 'commit_pending' as const, changed: changed.count > 0, found: true }
+        }
+        return { status: 'commit_pending' as const, changed: false, found: true }
+      }
+      const changed = await tx.trip.updateMany({ where: { id: tripId, userId, genRunId: trip.genRunId, genRunPhase: 'commit_pending' },
+        data: { genRunId: null, genActiveUserId: null, genRunPhase: 'recovery', genHeartbeatAt: null, genRunStartedAt: null,
+          genReviewId: null, genError: '待提交结果损坏，请取消后安全补缺' } })
+      return { status: 'recovery' as const, changed: changed.count > 0, found: true }
+    }
+    if (trip.genRunPhase === 'recovery') return { status: 'recovery' as const, changed: false, found: true }
+    if (trip.genRunId && trip.genHeartbeatAt && trip.genHeartbeatAt >= stale) return { status: 'active' as const, changed: false, found: true }
+    if (trip.genRunId || trip.genRunPhase === 'reviewing' || trip.status === 'generating') {
+      const changed = await tx.trip.updateMany({ where: { id: tripId, userId, genRunId: trip.genRunId,
+        ...(trip.genRunId ? { OR: [{ genHeartbeatAt: null }, { genHeartbeatAt: { lt: stale } }] } : {}) },
+        data: { genRunId: null, genActiveUserId: null, genRunPhase: 'recovery', genHeartbeatAt: null, genRunStartedAt: null,
+          genError: trip.genReview ? '生成恢复进程已中断，请取消未确认方案后安全补缺' : '生成进程已中断，请取消后从缺失日期安全补缺' } })
+      return { status: 'recovery' as const, changed: changed.count > 0, found: true }
+    }
+    return { status: 'idle' as const, changed: false, found: true }
+  })
 }

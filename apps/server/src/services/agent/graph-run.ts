@@ -12,7 +12,7 @@ import { type PlannedDay, optimizeCommute } from './scheduler'
 import { nightKindOfText, parseDayTypeBan } from './spot-rules'
 import { buildAgentGraph, DayCommitError, estimateTransitTotal, type AgentGraphContext, type ReviewAnswer } from './graph'
 import { HEARTBEAT_INTERVAL_MS, heartbeatRun, assertRunOwner, updateOwnedTrip, releaseRun, RunLostError } from './run-lock'
-import { isPendingCommitShape } from './pending-commit'
+import { parsePendingCommitJournal } from './pending-commit'
 
 export class GraphGenerateError extends Error {}
 export class ReviewConflictError extends Error { readonly status = 409 }
@@ -36,27 +36,6 @@ interface PendingCommit {
   totalDays: number
   day: PlannedDay
   warnings: string[]
-}
-
-function parsePendingCommit(value: string | null): PendingCommit | null {
-  if (!value) return null
-  try {
-    const parsed: unknown = JSON.parse(value)
-    return isPendingCommitShape(parsed) ? parsed as unknown as PendingCommit : null
-  } catch {
-    return null
-  }
-}
-
-function parsePendingCommitConfig(value: string | null): PendingCommit | null {
-  if (!value) return null
-  try {
-    const parsed = JSON.parse(value) as { pendingCommit?: unknown }
-    if (!parsed || typeof parsed.pendingCommit !== 'object' || parsed.pendingCommit === null) return null
-    return parsePendingCommit(JSON.stringify(parsed.pendingCommit))
-  } catch {
-    return null
-  }
 }
 
 // 工厂仅封装外部服务依赖；路由、锁、生产图、事务、SQLite checkpoint 都使用真实实现。
@@ -127,7 +106,7 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
     // Once a model result has reached either journal column, every later
     // error must preserve it.  A missing credential or context lookup cannot
     // turn a safe no-model retry into a fresh model generation.
-    const pending = parsePendingCommit(current.genReview) ?? parsePendingCommitConfig(current.genRunConfig)
+    const pending = parsePendingCommitJournal(current.genReview, current.genRunConfig)
     if (pending) {
       await prisma.trip.updateMany({ where: { id: tripId, genRunId: runId }, data: {
         status: 'failed', genRunPhase: 'commit_pending',
@@ -171,7 +150,7 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
       // model result.  Callers cannot switch it into restart/review or change
       // candidate fan-out while completing the already-persisted result.
       const before = await prisma.trip.findUniqueOrThrow({ where: { id: tripId }, select: { genReview: true, genRunConfig: true } })
-      const pendingBefore = parsePendingCommit(before.genReview) ?? parsePendingCommitConfig(before.genRunConfig)
+      const pendingBefore = parsePendingCommitJournal(before.genReview, before.genRunConfig)
       let savedConfig: { reviewMode?: boolean; parallelCandidates?: number } = {}
       try { savedConfig = JSON.parse(before.genRunConfig ?? '{}') as typeof savedConfig } catch { /* validation below */ }
       const mode = pendingBefore ? (savedConfig.reviewMode ? 'review' : 'continue') : requestedMode
@@ -182,7 +161,7 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
       if (pendingBefore) runConfig.pendingCommit = pendingBefore
       await updateOwnedTrip(tripId, runId, { genRunConfig: JSON.stringify(runConfig) })
       const tripSnapshot = await prisma.trip.findUniqueOrThrow({ where: { id: tripId } })
-      const pendingCommit = parsePendingCommit(tripSnapshot.genReview) ?? parsePendingCommitConfig(tripSnapshot.genRunConfig) ?? pendingBefore
+      const pendingCommit = parsePendingCommitJournal(tripSnapshot.genReview, tripSnapshot.genRunConfig) ?? pendingBefore
       if (pendingCommit && mode === 'restart') throw new GraphGenerateError('已有待提交的模型结果，请继续生成完成提交或安全取消后再规划')
       let existing = await prisma.tripDay.findMany({ where: { tripId }, orderBy: { dayIndex: 'asc' }, include: { items: true } })
       if (pendingCommit) {
@@ -302,7 +281,7 @@ export function createGraphRuntime(deps: RuntimeDependencies = {}) {
       if (recovery) {
         const after = await prisma.trip.findUnique({ where: { id: tripId }, select: { genRunId: true, genRunPhase: true, genReview: true, genRunConfig: true } })
         if (after?.genRunId === runId && after.genRunPhase === 'commit_pending' &&
-          (parsePendingCommit(after.genReview) ?? parsePendingCommitConfig(after.genRunConfig))) recovery = false
+          parsePendingCommitJournal(after.genReview, after.genRunConfig)) recovery = false
         // A journal failure has no safe payload to preserve.  `fail` clears
         // the phase and review fields, so release this owner just like the
         // generate path; only checkpoint/review failures stay manual recovery.

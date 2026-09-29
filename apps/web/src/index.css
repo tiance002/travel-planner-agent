@@ -1,459 +1,105 @@
-/* 全局基础样式。具体组件样式交给 Ant Design，这里负责两套主题的页面氛围。 */
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
-    sans-serif;
-  /* 过渡让切换主题时背景渐变而不是跳变 */
-  transition: background 0.4s ease, color 0.4s ease;
-}
-
-/* ------------------------------------------------------------------ */
-/* 两套主题的页面背景：动漫旅行插画打底，叠一层同色薄纱保证文字可读。  */
-/* 插画是 AI 生成的场景图，白天 = 湖畔小镇水彩风，黑夜 = 星河月夜。    */
-/* ------------------------------------------------------------------ */
-
-:root[data-theme='day'] body {
-  color: #2b3a33;
-  background:
-    linear-gradient(180deg, rgba(248, 247, 240, 0.55), rgba(248, 247, 240, 0.68)),
-    url('/bg-day.jpg') center / cover no-repeat fixed;
-}
-
-:root[data-theme='night'] body {
-  color: #d8e2f0;
-  background:
-    linear-gradient(180deg, rgba(11, 17, 29, 0.62), rgba(11, 17, 29, 0.74)),
-    url('/bg-night.jpg') center / cover no-repeat fixed;
-}
-
-/* ------------------------------------------------------------------ */
-/* 左侧栏与顶栏：毛玻璃质感，让背景插画从底下透出来                    */
-/* ------------------------------------------------------------------ */
-
-.app-sider {
-  /* antd 组件自带的背景要用 !important 压掉 */
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(250, 248, 240, 0.7)) !important;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-right: 1px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 4px 0 24px rgba(90, 110, 90, 0.08);
-}
-
-:root[data-theme='night'] .app-sider {
-  background: linear-gradient(180deg, rgba(20, 28, 46, 0.78), rgba(13, 19, 32, 0.82)) !important;
-  border-right: 1px solid rgba(125, 155, 232, 0.16);
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.35);
-}
-
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  padding-inline: 24px;
-  background: rgba(255, 255, 255, 0.55) !important;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.5);
-}
-
-:root[data-theme='night'] .app-header {
-  background: rgba(18, 26, 43, 0.6) !important;
-  border-bottom: 1px solid rgba(125, 155, 232, 0.14);
-}
-
-/* 侧栏顶部的风景横幅：随主题换插画，应用名叠在左下角 */
-.app-banner {
-  position: relative;
-  height: 108px;
-  margin: 12px 12px 6px;
-  border-radius: 14px;
-  overflow: hidden;
-  background: url('/bg-day.jpg') center 32% / cover no-repeat;
-  box-shadow: 0 4px 14px rgba(90, 110, 90, 0.18);
-}
-
-:root[data-theme='night'] .app-banner {
-  background-image: url('/bg-night.jpg');
-  background-position: center 24%;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
-}
-
-.app-banner-title {
-  position: absolute;
-  left: 12px;
-  bottom: 10px;
-  color: #fff;
-  font-size: 15px;
-  font-weight: 600;
-  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
-  letter-spacing: 0.5px;
-}
-
-/* 黑夜下把 antd Layout 自带的底色收掉，露出背景插画 */
-:root[data-theme='night'] .ant-layout {
-  background: transparent;
-}
-
-/* 登录页的居中容器 */
-.login-page {
-  min-height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 400px;
-}
-
-/* ==================================================================== */
-/* 纸质手帐材质层                                                        */
-/*                                                                      */
-/* 这一层负责三样东西：纸纹颗粒、线圈本、便利贴+胶带、牛皮纸书签。       */
-/* 全部靠 CSS 画，不引入任何图片素材——素材会随主题、分辨率、打包体积    */
-/* 三个方向一起变复杂，而这三样东西用渐变和内联 SVG 就能做到位。         */
-/* ==================================================================== */
-
 :root {
-  /* 纸纹颗粒：SVG 湍流噪声内联成 data URI。
-     为什么用噪声而不是重复渐变：渐变的重复周期在视网膜屏上会看出「网格感」，
-     噪声是真随机的，铺在纸面上更像纤维。
-     opacity 直接烘进 SVG 里，因此不需要 mix-blend-mode——避免和 antd
-     那些自带 mix-blend / z-index 的组件打架。 */
-  --paper-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
-
-  /* 刚接触桌面的那层「贴地」阴影，纸页都用它 */
-  --paper-lift: 0 1px 2px rgba(110, 92, 56, 0.12), 0 10px 26px rgba(110, 92, 56, 0.1);
-
-  /* 线圈本的纸面与格线 */
-  --nb-paper: #fdf9ef;
-  --nb-rule: rgba(120, 150, 175, 0.2);
-  --nb-margin: rgba(196, 108, 96, 0.42);
-  --nb-ring: #b9ad97;
-  --nb-ring-shine: #e8e0cd;
-
-  /* 便利贴的胶带。半透明偏暖白，像真正的美纹纸胶带 */
-  --tape: rgba(255, 253, 244, 0.62);
-  --tape-edge: rgba(180, 166, 138, 0.34);
-  --tape-shadow: 0 1px 2px rgba(90, 76, 48, 0.12);
-
-  /* 书签的牛皮纸：白天棕色。黑夜那套在下面覆盖 */
-  --mark-top: #9a7a54;
-  --mark-bottom: #6f5236;
-  --mark-edge: rgba(58, 40, 22, 0.34);
-  --mark-ink: #fdf6e8;
-  --mark-ink-dim: rgba(253, 246, 232, 0.72);
-  --mark-hole: rgba(58, 40, 22, 0.42);
+  --travel-canvas: #f8f7f3;
+  --travel-surface: #ffffff;
+  --travel-ink: #263a32;
+  --travel-border: #dee5df;
+  --travel-border-strong: #718f82;
+  --travel-forest: #2f7058;
+  --travel-lake: #416f8b;
 }
 
 :root[data-theme='night'] {
-  --paper-lift: 0 1px 2px rgba(0, 0, 0, 0.45), 0 10px 26px rgba(0, 0, 0, 0.4);
-
-  --nb-paper: #262b33;
-  --nb-rule: rgba(140, 170, 210, 0.13);
-  --nb-margin: rgba(200, 130, 130, 0.3);
-  --nb-ring: #5d6675;
-  --nb-ring-shine: #89949f;
-
-  --tape: rgba(226, 232, 240, 0.16);
-  --tape-edge: rgba(200, 214, 232, 0.2);
-  --tape-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-
-  /* 书签的黑夜版：灰色。同一套变量名，组件侧不用写任何 if */
-  --mark-top: #5c636e;
-  --mark-bottom: #3f454e;
-  --mark-edge: rgba(0, 0, 0, 0.4);
-  --mark-ink: #e8edf3;
-  --mark-ink-dim: rgba(232, 237, 243, 0.68);
-  --mark-hole: rgba(0, 0, 0, 0.42);
+  --travel-canvas: #141b18;
+  --travel-surface: #1d2622;
+  --travel-ink: #edf4ef;
+  --travel-border: #3c4d45;
+  --travel-border-strong: #9dbbad;
+  --travel-forest: #8ed0ad;
+  --travel-lake: #8fc1dc;
 }
 
-/* -------------------------------------------------------------------- */
-/* 纸页：所有 antd 卡片自动获得纸纹。                                    */
-/* !important 是必要的——antd 用 cssinjs 在运行时注入样式，            */
-/* 注入顺序在我们的 index.css 之后，不加 !important 会被它的           */
-/* background 简写属性整个重置掉（简写会连带清掉 background-image）。   */
-/* -------------------------------------------------------------------- */
-.ant-card,
-.paper-sheet {
-  background-image: var(--paper-grain) !important;
-  box-shadow: var(--paper-lift);
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; }
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--travel-canvas);
+  color: var(--travel-ink);
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif;
+  font-size: 15px;
 }
 
-/* -------------------------------------------------------------------- */
-/* 牛皮纸书签                                                           */
-/* -------------------------------------------------------------------- */
+a { color: inherit; }
+.app-shell { min-height: 100dvh; }
+.app-main { min-width: 0; }
+.app-sider { background: var(--travel-surface) !important; border-right: 1px solid var(--travel-border); }
+.app-header { background: var(--travel-surface) !important; border-bottom: 1px solid var(--travel-border); }
+.app-header { height: 64px; padding: 0 28px !important; display: flex; align-items: center; justify-content: space-between; }
+.app-header-start { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.app-header-brand { display: none; font-size: 16px; font-weight: 600; white-space: nowrap; }
+.app-menu-button { display: none; }
+.app-account-button { height: 44px; }
+.app-account-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-brand { padding: 24px 20px 18px; color: var(--travel-ink); font-size: 17px; font-weight: 600; }
+.app-brand-mark { color: var(--travel-forest); font-size: 20px; margin-right: 8px; }
+.app-nav-content { display: flex; flex-direction: column; min-height: calc(100dvh - 72px); }
+.app-theme-switch { margin-top: auto; padding: 20px; display: grid; gap: 10px; }
+.app-content { min-width: 0; padding: 28px 32px 48px; background: var(--travel-canvas); }
+.page-shell { width: min(1200px, 100%); margin: 0 auto; }
+.form-shell { width: min(720px, 100%); margin: 0 auto; }
+.login-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: var(--travel-canvas); }
+.login-card { width: min(400px, 100%); border: 1px solid var(--travel-border); box-shadow: 0 12px 32px rgba(38,58,50,.08); }
 
-/* 书签本体。右端用 clip-path 切出 V 形缺口——这是书签最容易被认出的特征，
-   比加个圆角矩形加个图标都要直接。 */
-.bookmark {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  /* 厚度比第一版放大约 5/3（48px → 80px）：原来是细长条，
-     里面塞两行信息会显得很挤。加厚之后行距、内边距都能舒展开。
-     「细长」靠的是横向远长于纵向，不是靠压薄。 */
-  min-height: 80px;
-  padding: 14px 52px 14px 24px;
-  /* 右端 V 口。缺口宽度也跟着厚度走，太窄的话在厚书签上会看不出来 */
-  clip-path: polygon(0 0, 100% 0, calc(100% - 22px) 50%, 100% 100%, 0 100%);
-  border-radius: 3px 0 0 3px;
-  /* 牛皮纸有方向性的纤维，用 115° 的斜向渐变比纯色更有纸感。
-     渐变之外还要给一个 background-color 兜底——裁剪后如果只剩渐变，
-     取计算样式会得到透明的底色，任何依赖底色判断的逻辑都会误判。 */
-  background-color: var(--mark-bottom);
-  background-image: linear-gradient(115deg, var(--mark-top), var(--mark-bottom));
-  color: var(--mark-ink);
-  cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
-  box-shadow: 0 1px 2px var(--mark-edge), 0 6px 16px rgba(60, 44, 24, 0.16);
-  will-change: transform;
+.ant-layout, .ant-layout-content { background: transparent; }
+.ant-card { border-color: var(--travel-border); }
+.ant-card-head-title { font-weight: 600; }
+.ant-tag { color: var(--travel-ink) !important; }
+.ant-btn, .ant-input, .ant-input-affix-wrapper, .ant-select-selector, .ant-picker, .ant-input-number { border-radius: 8px !important; }
+.ant-input:focus, .ant-input-focused, .ant-select-focused .ant-select-selector, .ant-picker-focused { border-color: var(--travel-border-strong) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--travel-forest) 24%, transparent) !important; }
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--travel-forest); outline-offset: 2px; }
+.trip-card { transition: border-color .15s ease, box-shadow .15s ease; }
+.trip-card:hover { border-color: var(--travel-forest); box-shadow: 0 8px 24px rgba(47,112,88,.12); }
+.trip-card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.day-tabs { overflow-x: auto; max-width: 100%; }
+.day-tabs > * { flex: 0 0 auto; }
+.timeline-item { border-left: 2px solid var(--travel-border); padding: 0 0 20px 20px; position: relative; }
+.timeline-item::before { content: ''; position: absolute; left: -7px; top: 3px; width: 10px; height: 10px; border-radius: 50%; background: var(--travel-forest); border: 2px solid var(--travel-surface); }
+.map-panel { min-height: 320px; }
+.day-layout > .ant-col { min-width: 0; }
+.day-tabs { display: flex; gap: 8px; padding: 2px 2px 10px; margin-bottom: 12px; }
+.day-tabs .ant-btn { min-height: 44px; }
+.trip-item-title { overflow-wrap: anywhere; }
+.trip-route-map { height: 420px; }
+.stay-map { min-height: 320px; }
+.avatar-options { display: grid; grid-template-columns: repeat(6, 44px); gap: 8px; }
+
+@media (max-width: 1023px) {
+  .app-sider { display: none !important; }
+  .app-menu-button, .app-header-brand { display: inline-flex; }
+  .app-header { padding-inline: 16px !important; }
+  .app-content { padding: 20px 20px 32px !important; }
 }
-
-.bookmark:hover {
-  transform: translateX(3px);
-  filter: brightness(1.07);
-  box-shadow: 0 2px 4px var(--mark-edge), 0 12px 26px rgba(60, 44, 24, 0.24);
+@media (max-width: 767px) {
+  .app-content { padding: 16px !important; }
+  .app-account-name { display: none; }
+  .page-shell { width: 100%; }
+  .login-page { padding: 16px; }
+  .ant-card-body { padding: 16px; }
+  .trip-card-actions { width: 100%; }
+  .trip-card-actions .ant-btn { flex: 1 1 auto; min-height: 44px; }
+  .ant-btn { min-height: 44px; }
+  .ant-btn-icon-only { min-width: 44px; }
+  .ant-radio-button-wrapper { min-height: 44px; display: inline-flex; align-items: center; }
+  .ant-segmented-item { min-height: 44px; display: inline-flex; align-items: center; }
+  .map-panel { min-height: 280px; }
+  .trip-route-map { height: 320px; }
+  .route-card .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+  .route-card .ant-card-head-title { min-width: 0; flex-basis: 100%; }
+  .route-card .ant-card-extra { margin-inline-start: 0; }
+  .stay-card .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+  .stay-card .ant-card-head-title { min-width: 0; flex-basis: 100%; }
+  .stay-card .ant-card-extra { margin-inline-start: 0; }
+  .avatar-options { grid-template-columns: repeat(4, 44px); }
+  .mobile-stack { display: block !important; }
 }
-
-/* 左端的穿线孔 + 露出来的线头。书签的第二个识别特征 */
-.bookmark::before {
-  content: '';
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  width: 9px;
-  height: 9px;
-  margin-top: -4.5px;
-  border-radius: 50%;
-  background: var(--mark-hole);
-  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35);
-}
-
-/* 书签上的一层高光斜纹，让它看起来是有厚度的纸而不是一块色板 */
-.bookmark::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.14),
-    rgba(255, 255, 255, 0) 42%,
-    rgba(0, 0, 0, 0.1)
-  );
-}
-
-/* 书签上的信息标。加厚之后可以给足内边距，不必再挤在一起 */
-.bookmark-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 11px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--mark-ink-dim);
-  background: rgba(255, 255, 255, 0.13);
-  white-space: nowrap;
-}
-
-/* -------------------------------------------------------------------- */
-/* 线圈本                                                               */
-/* -------------------------------------------------------------------- */
-
-.notebook {
-  position: relative;
-  /* 左边留出线圈与页边线的位置 */
-  padding-left: 54px;
-  border-radius: 3px 14px 14px 3px;
-  background-color: var(--nb-paper);
-  background-image:
-    var(--paper-grain),
-    repeating-linear-gradient(
-      180deg,
-      transparent 0 30px,
-      var(--nb-rule) 30px 31px
-    );
-  box-shadow: var(--paper-lift);
-  /* 注意：这里不能加 overflow:hidden。线圈是定位在 left:-9px 的，
-     一旦裁剪就整个消失；圆角本身不影响背景的绘制范围，用不着裁。 */
-}
-
-/* 页边红线。真笔记本印刷上就有，是「本子」最省力的信号 */
-.notebook::before {
-  content: '';
-  position: absolute;
-  left: 44px;
-  top: 0;
-  bottom: 0;
-  width: 1.5px;
-  background: var(--nb-margin);
-}
-
-/* 左侧的线圈环。每个环都要「穿」过纸边，所以定位在纸张左边缘上 */
-.notebook-rings {
-  position: absolute;
-  left: -9px;
-  top: 0;
-  bottom: 0;
-  width: 30px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-evenly;
-  align-items: center;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.notebook-ring {
-  width: 27px;
-  height: 13px;
-  border-radius: 999px;
-  /* 金属线圈：上浅下深，模拟圆环受光 */
-  background: linear-gradient(180deg, var(--nb-ring-shine), var(--nb-ring));
-  box-shadow:
-    inset 0 -1.5px 1px rgba(0, 0, 0, 0.22),
-    0 1px 2px rgba(60, 50, 30, 0.22);
-}
-
-/* -------------------------------------------------------------------- */
-/* 便利贴                                                               */
-/*                                                                      */
-/* 用 --tilt 变量承载倾斜角，而不是把 transform 写在行内样式里：        */
-/* 行内 transform 的优先级最高，hover 状态就再也盖不掉它，便利贴        */
-/* 也就永远不会「贴正」。                                               */
-/* -------------------------------------------------------------------- */
-
-.sticky-note {
-  position: relative;
-  border-radius: 3px;
-  /* 便利贴是压在纸页上的，所以阴影要比纸页强一档，才能看出浮起 */
-  box-shadow: 0 1px 2px rgba(90, 76, 48, 0.16), 0 7px 16px rgba(90, 76, 48, 0.13);
-  transform: rotate(var(--tilt, 0deg));
-  transform-origin: 50% 8%;
-  /* 只过渡阴影。
-     刻意不做位移和旋转的悬停效果——用户明确说过「鼠标移上去不要晃」。
-     原来是转正 + 上抬 + 回弹曲线，视觉上会有一阵抖动，安静下来更耐看。 */
-  transition: box-shadow 0.2s ease;
-}
-
-.sticky-note:hover {
-  /* 只把阴影轻微收紧一点表示「被指到了」，元素本身原地不动 */
-  box-shadow: 0 1px 2px rgba(90, 76, 48, 0.2), 0 10px 22px rgba(90, 76, 48, 0.18);
-}
-
-:root[data-theme='night'] .sticky-note {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 7px 16px rgba(0, 0, 0, 0.38);
-}
-
-:root[data-theme='night'] .sticky-note:hover {
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.44), 0 10px 22px rgba(0, 0, 0, 0.44);
-}
-
-/* 便利贴顶端两角的胶带。半透明，压在纸边上方，所以要允许溢出 */
-.sticky-tape {
-  position: absolute;
-  top: -9px;
-  width: 46px;
-  height: 17px;
-  background: var(--tape);
-  border-left: 1px dashed var(--tape-edge);
-  border-right: 1px dashed var(--tape-edge);
-  box-shadow: var(--tape-shadow);
-  pointer-events: none;
-}
-
-.sticky-tape-left {
-  left: 8px;
-  transform: rotate(-37deg);
-}
-
-.sticky-tape-right {
-  right: 8px;
-  transform: rotate(37deg);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .bookmark,
-  .sticky-note {
-    transition: none;
-  }
-}
-
-/* -------------------------------------------------------------------- */
-/* antd 浮层（Select 下拉等）                                                */
-/*                                                                      */
-/* 两个连续问题的统一修法：                                              */
-/*   1. 用户报告「下拉滚到列表底之后，整页跟着滚」——原因是              */
-/*      虚拟列表没把"已经到边界"的信号传给浏览器，滚轮事件              */
-/*      继续冒泡，外层 layout 接管滚动，于是整页跟着动。                */
-/*   2. 下拉浮层在视口边缘时高度计算没预留余量，会撑出可视区，          */
-/*      用户看不到全部选项。                                            */
-/* CSS 标准里 `overscroll-behavior: contain` 就是为这种情况设计的：     */
-/* 它告诉浏览器「这个区域的滚动我内部消化，溢出不要传给祖先」。        */
-/* -------------------------------------------------------------------- */
-
-.ant-select-dropdown,
-.ant-picker-dropdown {
-  max-height: min(380px, calc(100vh - var(--ant-padding-sm, 8px) * 2));
-  /* 浮层挂到 body，与滚动容器不在同一个 flex 子树，
-     视口高度必须用 100vh 而不是父容器高度 */
-}
-
-/* 关键：让下拉内部的滚动「自包含」——到边界后不再冒泡 */
-.ant-select-dropdown .rc-virtual-list,
-.ant-select-dropdown .ant-select-item,
-.ant-select-dropdown [class*="virtual-list"] {
-  overscroll-behavior: contain;
-}
-
-/* 兜底：直接覆盖到下拉根节点，因为浮层可能换虚拟列表实现 */
-.ant-select-dropdown * {
-  overscroll-behavior: contain;
-}
-
-/* -------------------------------------------------------------------- */
-/* 表单：让录入区像「印在纸上的表格」，而不是一堆白色方块               */
-/*                                                                      */
-/* 背景色由 token 的 colorBgContainer 统一改成纸色，这里只需要处理       */
-/* 层次与形状：字段名加重、说明文字收小、控件描边统一圆角。              */
-/* -------------------------------------------------------------------- */
-
-.ant-form-item-label > label {
-  /* 字段名当作印刷标题处理：加重一点点就够，不必放大 */
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-
-.ant-form-item-extra {
-  /* 说明文字收小并压低对比，避免和字段名抢注意力 */
-  font-size: 12px;
-  margin-top: 5px;
-}
-
-/* 控件统一成同一档圆角，避免输入框、日期、下拉各自一个形状 */
-.ant-input,
-.ant-input-affix-wrapper,
-.ant-input-number,
-.ant-picker,
-.ant-select .ant-select-content,
-.ant-btn {
-  border-radius: 9px;
-}
-
-
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }

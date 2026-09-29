@@ -47,6 +47,7 @@ import {
   getItemAlternatives,
   getTrip,
   parseGenerationReview,
+  recoverGeneration,
   replaceItem,
   uncheckinItem,
   type AlternativeCandidate,
@@ -57,50 +58,8 @@ import {
   type TripItemData,
 } from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
-import { NotebookRings, StickyNote, usePaperTheme } from '../components/paper'
+import GenerationStatusTag from '../components/GenerationStatusTag'
 import { useGenerationPolling } from '../hooks/useGenerationPolling'
-
-/**
- * 便利贴上的小标。
- *
- * 为什么不用 antd 的 Tag：Tag 自带浅彩底，压在淡彩便利贴上会变成
- * 「贴纸叠贴纸」，颜色一多就乱。这里改成墨色描边的空标，
- * 只有「当前目标」给一点主色实底用来抢视线。
- */
-function NoteTag({
-  children,
-  ink,
-  rule,
-  accent,
-}: {
-  children: React.ReactNode
-  ink: string
-  rule: string
-  /** primary 用主色强调（当前目标），其余一律朴素墨色描边 */
-  accent?: 'primary'
-}) {
-  const { token } = antdTheme.useToken()
-  const isPrimary = accent === 'primary'
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: '1px 7px',
-        borderRadius: 4,
-        fontSize: 11.5,
-        lineHeight: 1.75,
-        color: isPrimary ? token.colorPrimary : ink,
-        border: `1px solid ${isPrimary ? token.colorPrimaryBorder : rule}`,
-        background: isPrimary ? token.colorPrimaryBg : 'transparent',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {children}
-    </span>
-  )
-}
 
 /** 时段的中文标签。key 与后端 persistDay 写入的 slot 值一一对应 */
 const SLOT_LABEL: Record<string, string> = {
@@ -295,17 +254,10 @@ export default function TripDetail() {
   /** 正在替换的候选 poiId，让对应那张卡片转圈 */
   const [replacingPoiId, setReplacingPoiId] = useState<string | null>(null)
 
-  /**
-   * 地图的像素高度。
-   *
-   * 为什么要算而不写死：右列的卡片高度是 calc(100vh - 概要与留白)，
-   * 地图要填满卡片 body 的剩余空间，就必须知道视口有多高。
-   * 写死 520 在小屏上会把整页撑出滚动条，在大屏上又留出大片空白。
-   *
-   * 减去 460 的构成：顶部 app-header（约 64）+ 内容区内边距（约 36）
-   * + 行程概要卡（约 130）+ 右侧卡片头部与底部说明（约 200）。
-   */
-  const [mapHeight, setMapHeight] = useState(() => Math.max(300, window.innerHeight - 460))
+  /** 地图在手机与桌面间取不同高度，手机默认折叠，展开时才挂载地图。 */
+  const [mapHeight, setMapHeight] = useState(() => window.innerWidth < 768 ? 320 : 420)
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768)
+  const [mapExpanded, setMapExpanded] = useState(false)
 
   // --- 数据加载 ---------------------------------------------------------------
 
@@ -401,28 +353,13 @@ export default function TripDetail() {
   // 视口尺寸变化时重算地图高度：右列锁定布局依赖它，不能只在挂载时算一次
   useEffect(() => {
     function syncMapHeight() {
-      setMapHeight(Math.max(300, window.innerHeight - 460))
+      const mobile = window.innerWidth < 768
+      setIsMobile(mobile)
+      setMapHeight(mobile ? 320 : 420)
     }
     window.addEventListener('resize', syncMapHeight)
     return () => window.removeEventListener('resize', syncMapHeight)
   }, [])
-
-  // 线圈本左侧要排多少个金属环。环间距固定 27px，数量跟着本子高度变，
-  // 写死数量会在高屏上稀稀拉拉、矮屏上挤成一条实线
-  const ringCount = useMemo(
-    () => Math.max(8, Math.floor((window.innerHeight - 248) / 27)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapHeight],
-  )
-
-  // 纸质主题的取色入口。note.* 是便利贴上的（恒为浅底深墨，不随主题翻），
-  // page.* 是纸页上的文字（跟着主题走）。
-  //
-  // **这个 hook 必须放在下面那两个提前 return 之前。**
-  // React 要求每次渲染的 hook 数量与调用顺序完全一致：一旦放到提前 return 之后，
-  // 第一次渲染（loading）会少走一个 hook、第二次却多走一个，直接抛
-  // 「Rendered more hooks than during the previous render」，整页白屏。
-  const { note, page } = usePaperTheme()
 
   const reviewRequest: GenerationReviewRequest | null = useMemo(
     () => parseGenerationReview(trip?.genReview),
@@ -434,17 +371,6 @@ export default function TripDetail() {
   const day: TripDayData | undefined = useMemo(
     () => trip?.tripDays.find((d) => d.dayIndex === activeDay),
     [trip, activeDay],
-  )
-
-  /**
-   * 便利贴的淡彩按条目在当天的顺序轮换（序号 → 颜色）。
-   *
-   * 用序号而不是随机：随机每次渲染都可能换色，用户滚动时颜色乱跳，看着像 bug。
-   * 同样必须留在提前 return 之前——理由见上面 noteInk 处的说明。
-   */
-  const noteIndex = useMemo(
-    () => new Map((day?.items ?? []).map((item, index) => [item.id, index])),
-    [day],
   )
 
   /** 当天第一个未打卡的条目。它就是「当前目标」，列表和地图都要重点突出 */
@@ -669,6 +595,18 @@ export default function TripDetail() {
     }
   }
 
+  async function checkInterruptedGeneration() {
+    if (!trip) return
+    try {
+      const result = await recoverGeneration(trip.id)
+      await loadTrip()
+      if (result.status === 'recovery') message.warning('任务已中断，可以取消后安全补齐缺失日期')
+      else if (result.status === 'commit_pending') message.info('已生成安排仍在，可以重试保存')
+      else if (result.status === 'waiting') message.info('正在等待你的确认')
+      else if (result.status === 'active') message.info('任务仍在执行')
+    } catch (err) { message.error(extractError(err, '暂时无法检查生成状态')) }
+  }
+
   /** 详情页刷新后直接提交当前 reviewId，迟到点击不会裁决下一张卡。 */
   async function confirmReview(answer: { decision: 'approve' | 'choose' | 'reject'; choice?: 'A' | 'B' }) {
     if (!trip) return
@@ -851,16 +789,13 @@ export default function TripDetail() {
   const commitPending = trip.genRunPhase === 'commit_pending'
   // partial/failed 都表示当前没有正在执行的模型任务；即使服务端已经落库
   // 了全部日期，也要保留幂等 continue 入口，让后端完成最后的收尾状态推进。
-  const canContinue = trip.status === 'partial' || trip.status === 'failed'
+  const canContinue = (trip.status === 'partial' || trip.status === 'failed') && trip.genRunPhase !== 'recovery'
   const continueLabel = commitPending
     ? '重试保存已生成安排'
     : missingDayIndexes.length > 0
       ? `继续补齐${missingDaysText}`
       : '核对并完成行程'
   const canReplan = completedDayCount > 0
-
-  // 便利贴的墨色与序号在文件上方定义（那里是 hook 区）。
-  // 这里只用它们，不再声明任何 hook —— 本行以下都在提前 return 之后。
 
   // 「换一个」抽屉要用它把邻站说清楚：首站的上一站是住处，末站的下一站是住处
   const swapIsFirst = Boolean(swapTarget && dayItems[0]?.id === swapTarget.id)
@@ -869,7 +804,7 @@ export default function TripDetail() {
   )
 
   return (
-    <div style={{ maxWidth: 1080, margin: '0 auto' }}>
+    <div className="page-shell">
       {/* ---- 行程概要 ---- */}
       <Card style={{ marginBottom: 16 }}>
         <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start">
@@ -878,23 +813,7 @@ export default function TripDetail() {
               <Typography.Title level={4} style={{ margin: 0 }}>
                 {trip.title}
               </Typography.Title>
-              {trip.status === 'ready' && <Tag color="success">已完成</Tag>}
-              {trip.status === 'generating' && (
-                <Tag color={trip.genRunPhase === 'waiting' || trip.genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
-                  {trip.genRunPhase === 'waiting'
-                    ? '等待确认'
-                    : trip.genRunPhase === 'recovery'
-                      ? '需要恢复'
-                      : commitPending
-                        ? '保存待重试'
-                      : '生成中'}
-                </Tag>
-              )}
-              {/* partial：整趟没排完（有跳过的天）。用 warning 而不是 error，
-                  因为大部分天是好的，用户只需补齐缺失的部分（报告 A08） */}
-              {trip.status === 'partial' && <Tag color="warning">部分完成</Tag>}
-              {trip.status === 'failed' && <Tag color="error">生成失败</Tag>}
-              {trip.status === 'draft' && <Tag>草稿</Tag>}
+              <GenerationStatusTag status={trip.status} phase={trip.genRunPhase} />
             </Space>
             <div style={{ marginTop: 8 }}>
               <Typography.Text type="secondary">
@@ -911,6 +830,9 @@ export default function TripDetail() {
               </Button>
             )}
             <Button onClick={() => navigate('/trips')}>返回列表</Button>
+            {(trip.status === 'generating' || trip.genRunPhase === 'commit_pending') && (
+              <Button onClick={() => void checkInterruptedGeneration()} data-testid="trip-recover-check">检查中断状态</Button>
+            )}
           </Space>
         </Space>
 
@@ -1192,26 +1114,16 @@ export default function TripDetail() {
           <Empty description="这个行程还没有排好的天。生成完成后就能在这里看到每日安排。" />
         </Card>
       ) : (
-        <Row gutter={16} align="top">
-          {/* ---- 左列：线圈本。每天的景点是贴在纸页上的便利贴 ----
-              左右各占 12 格（等宽）：两张纸的标题栏宽度必须一致，
-              11/13 的分法会让它们一宽一窄，视觉上像没对齐 */}
-          <Col xs={24} lg={12} data-testid="day-column">
-            <div
-              className="notebook"
-              style={{ height: 'calc(100vh - 248px)', display: 'flex', flexDirection: 'column' }}
-            >
-              {/* 左侧那排金属线圈，让它一眼就是个本子 */}
-              <NotebookRings count={ringCount} />
-
-              {/* 本子的抬头 */}
+        <Row gutter={[16, 16]} align="top" className="day-layout">
+          <Col xs={24} lg={13} data-testid="day-column">
+            <Card>
               <div
                 style={{
                   display: 'flex',
                   alignItems: 'baseline',
                   justifyContent: 'space-between',
                   gap: 12,
-                  padding: '16px 18px 6px 0',
+                  paddingBottom: 12,
                   flexShrink: 0,
                 }}
               >
@@ -1225,10 +1137,9 @@ export default function TripDetail() {
                 )}
               </div>
 
-              {/* 可滚动区。右边距留够，内容不会贴着纸边 */}
-              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 18px 20px 0' }}>
+              <div>
                 {/* 天数切换。label 里带日期与当天打卡进度 */}
-                <Space orientation="horizontal" wrap size={6} style={{ marginBottom: 14 }}>
+                <div className="day-tabs">
                   {trip.tripDays.map((d) => {
                     const total = d.items.length
                     const done = d.items.filter((item) => item.checkedAt).length
@@ -1249,7 +1160,7 @@ export default function TripDetail() {
                       </Button>
                     )
                   })}
-                </Space>
+                </div>
 
               {day && (
                 <div style={{ marginBottom: 12 }}>
@@ -1296,23 +1207,19 @@ export default function TripDetail() {
                       const segment = segmentText(item)
 
                       return (
-                        <StickyNote
+                        <div
                           key={item.id}
-                          index={noteIndex.get(item.id) ?? 0}
+                          className="timeline-item"
                           data-testid="trip-item"
                           data-checked={done ? 'true' : 'false'}
-                          onClick={() => selectItem(item)}
                           style={{
-                            // 上方留出胶带的位置：胶带是 top:-9px 的，不留就会被标题压住
-                            margin: '17px 0 12px',
-                            padding: '14px 13px 11px',
-                            // 选中的那张用主色描边加粗，告诉用户地图正在跟着它
+                            margin: '12px 0',
+                            padding: '14px 16px',
                             border: isSelected
-                              ? `1.5px solid ${note.ink}`
-                              : `1px solid ${note.rule}`,
-                            // 已打卡的便利贴像被翻过去一样压暗
-                            opacity: done ? 0.62 : 1,
-                            cursor: 'pointer',
+                              ? `2px solid ${token.colorPrimary}`
+                              : `1px solid ${token.colorBorderSecondary}`,
+                            borderRadius: token.borderRadius,
+                            background: token.colorBgContainer,
                           }}
                         >
                           {/* 标题行：名称 + 一排状态标签 */}
@@ -1353,30 +1260,33 @@ export default function TripDetail() {
                               strong
                               style={{
                                 textDecoration: done ? 'line-through' : undefined,
-                                color: note.ink,
+                                color: token.colorText,
                               }}
                               className="trip-item-title"
                               data-testid="trip-item-title"
                             >
                               {item.name}
                             </Typography.Text>
-                            <NoteTag ink={note.ink} rule={note.rule}>
+                            <Button type="link" size="small" onClick={() => selectItem(item)}>
+                              地图定位
+                            </Button>
+                            <Tag>
                               {item.itemType === 'restaurant' ? '餐厅' : '景点'}
-                            </NoteTag>
+                            </Tag>
                             {isTarget && (
-                              <NoteTag ink={note.ink} rule={note.rule} accent="primary">
+                              <Tag color="processing">
                                 当前目标
-                              </NoteTag>
+                              </Tag>
                             )}
                             {item.rating && (
-                              <NoteTag ink={note.ink} rule={note.rule}>
+                              <Tag>
                                 ★ {item.rating}
-                              </NoteTag>
+                              </Tag>
                             )}
                             {item.cost && (
-                              <NoteTag ink={note.ink} rule={note.rule}>
+                              <Tag>
                                 人均 ¥{item.cost}
-                              </NoteTag>
+                              </Tag>
                             )}
                           </div>
 
@@ -1384,7 +1294,7 @@ export default function TripDetail() {
                             {/* 左侧信息区 */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ marginTop: 4 }}>
-                                <Typography.Text style={{ fontSize: 12, color: note.inkSoft }}>
+                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                   {[
                                     item.openTimeText || (item.itemType === 'restaurant' ? '营业时间未知' : null),
                                     item.address,
@@ -1397,7 +1307,7 @@ export default function TripDetail() {
 
                               {item.note && (
                                 <div style={{ marginTop: 4 }}>
-                                  <Typography.Text style={{ fontSize: 12, color: note.ink }}>
+                                  <Typography.Text style={{ fontSize: 12 }}>
                                     {item.note}
                                   </Typography.Text>
                                 </div>
@@ -1457,59 +1367,41 @@ export default function TripDetail() {
 
                           {segment && (
                             <div style={{ marginTop: 6 }}>
-                              <Typography.Text style={{ fontSize: 12, color: note.inkSoft }}>
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                 ↓ {segment}
                               </Typography.Text>
                             </div>
                           )}
-                        </StickyNote>
+                        </div>
                       )
                     })}
                   </div>
                 ))
               )}
 
-                {/* 这句写在纸页上（不在便利贴里），所以用 page.* 的墨色：
-                    便利贴恒为浅底深墨、纸页跟着主题走，两者不能用同一套 */}
                 {dayItems.length > 0 && (
-                  <Typography.Text style={{ fontSize: 12, color: page.inkSoft }}>
-                    营业时间、价格与开放状态由 AI 整理，请以实际为准。点击条目可在右侧地图定位。
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    营业时间、价格与开放状态由 AI 整理，请以实际为准。使用“地图定位”可查看对应地点。
                   </Typography.Text>
                 )}
               </div>
-            </div>
+            </Card>
           </Col>
 
-          {/* ---- 右列：地图联动。整列固定在视口内，滚动时不动 ----
-              与左列等宽（12/12），保证两个标题栏宽度一致 */}
           <Col
             xs={24}
-            lg={12}
+            lg={11}
             data-testid="route-panel"
-            style={{
-              // 与左列同高，且用 sticky 钉在视口顶部：
-              // 左列内部滚动时右列不跟着动，地图始终可见
-              position: 'sticky',
-              top: 0,
-              height: 'calc(100vh - 248px)',
-            }}
           >
             <Card
-              // 标题用「日期 + 当日路线」而不是孤零零的「当日路线」，
-              // 这样它能和左边「每日安排」的标题栏视觉宽度对齐（都在卡片顶部同一行）
+              className="route-card"
               title={day ? `${dayjs(day.date).format('M月D日')} 当日路线` : '当日路线'}
-              style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
-              styles={{
-                body: {
-                  flex: 1,
-                  minHeight: 0,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  // 收紧内边距，把地图往上提，腾出一屏的空间
-                  paddingTop: 12,
-                },
-              }}
-              extra={
+              extra={<Space wrap>
+                {isMobile && (
+                  <Button aria-expanded={mapExpanded} onClick={() => setMapExpanded(value => !value)}>
+                    {mapExpanded ? '收起地图' : '展开地图'}
+                  </Button>
+                )}
                 <Radio.Group
                   size="small"
                   value={routeMode}
@@ -1517,11 +1409,10 @@ export default function TripDetail() {
                   optionType="button"
                   options={ROUTE_MODES.map((m) => ({ label: m.label, value: m.value }))}
                 />
-              }
+              </Space>}
             >
-              {/* 地图高度按视口算：卡片可用高度减去卡片头部、底部说明与内边距，
-                  让地图自适应剩余空间。写死像素值在小屏上会溢出到屏幕外 */}
-              <div style={{ flex: 1, minHeight: 260 }}>
+              {(!isMobile || mapExpanded) && <>
+              <div className="trip-route-map">
                 <AmapMap
                   center={mapCenter}
                   zoom={14}
@@ -1560,6 +1451,7 @@ export default function TripDetail() {
                   住宿锚点：{trip.stayName}
                 </Typography.Text>
               )}
+              </>}
             </Card>
           </Col>
         </Row>

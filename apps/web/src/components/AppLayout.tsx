@@ -1,25 +1,20 @@
-// 登录后的整体框架：左侧导航、顶部用户信息、右侧内容区。
-// 具体页面通过 react-router 的 Outlet 渲染进内容区。
-//
-// 布局约定：
-//   - 整个框架锁定在一屏高（100vh）里：左侧栏永远固定可见，只有右侧内容区滚动。
-//     这样菜单与底部的「外观」切换始终同屏，不会跟着内容一起滚走。
-//   - 左侧栏与顶栏用半透明毛玻璃：动漫风背景图从底下透出来，界面不显得死板。
-
 import {
   CarryOutOutlined,
+  CompassOutlined,
+  LogoutOutlined,
+  MenuOutlined,
   MoonOutlined,
   PlusCircleOutlined,
   SettingOutlined,
   SunOutlined,
 } from '@ant-design/icons'
-import { Button, Divider, Layout, Menu, Segmented, Space, Typography } from 'antd'
+import { Button, Drawer, Dropdown, Layout, Menu, Segmented, Space, Typography } from 'antd'
 import { useEffect, useState } from 'react'
-import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { clearToken, getToken } from '../auth'
 import { fetchMe, ME_UPDATED_EVENT, type MeInfo } from '../api/account'
-import UserAvatar from './UserAvatar'
 import { useTheme } from '../theme'
+import UserAvatar from './UserAvatar'
 
 const { Header, Sider, Content } = Layout
 
@@ -27,36 +22,16 @@ export default function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const { mode, toggle } = useTheme()
-
-  // 顶栏展示的用户信息。改名与换头像在设置页完成后会广播事件，这里监听刷新
   const [me, setMe] = useState<MeInfo | null>(null)
-
-  /**
-   * 当前是不是「行程详情」页（/trips/:id）。
-   *
-   * 用途：这一页要用「右侧锁定 + 左侧独立滚动」的布局，
-   * 外层内容区必须让出滚动权，否则会出现双层滚动条、
-   * 或者右侧地图被外层滚动带出视野。
-   * 判定要排除 /trips（列表）与 /trips/new（新建向导），它们仍需整页滚动。
-   */
-  const isTripDetailPage = /^\/trips\/[^/]+$/.test(location.pathname) && location.pathname !== '/trips/new'
+  const [navOpen, setNavOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    // 没有 token 时不必请求（正常流程 RequireAuth 已拦，这里做防御）
     if (!getToken()) return
-    fetchMe()
-      .then((info) => {
-        if (!cancelled) setMe(info)
-      })
-      .catch(() => undefined)
     const refresh = () => {
-      fetchMe()
-        .then((info) => {
-          if (!cancelled) setMe(info)
-        })
-        .catch(() => undefined)
+      void fetchMe().then(info => { if (!cancelled) setMe(info) }).catch(() => undefined)
     }
+    refresh()
     window.addEventListener(ME_UPDATED_EVENT, refresh)
     return () => {
       cancelled = true
@@ -64,88 +39,101 @@ export default function AppLayout() {
     }
   }, [])
 
-  // 根据当前路径决定左侧菜单高亮哪一项
+  useEffect(() => { setNavOpen(false) }, [location.pathname])
+
   const selectedKey = location.pathname.startsWith('/settings')
     ? 'settings'
-    : location.pathname.startsWith('/trips/new')
-      ? 'new'
-      : 'trips'
+    : location.pathname.startsWith('/trips/new') ? 'new' : 'trips'
 
-  function handleLogout() {
+  function logout() {
     clearToken()
     navigate('/login', { replace: true })
   }
 
+  const menuItems = [
+    { key: 'trips', icon: <CarryOutOutlined />, label: '我的行程', path: '/trips' },
+    { key: 'new', icon: <PlusCircleOutlined />, label: '新建行程', path: '/trips/new' },
+    { key: 'settings', icon: <SettingOutlined />, label: '个人设置', path: '/settings' },
+  ]
+
+  const navigation = (
+    <div className="app-nav-content">
+      <Menu
+        mode="inline"
+        selectedKeys={[selectedKey]}
+        items={menuItems.map(({ key, icon, label }) => ({ key, icon, label }))}
+        onClick={({ key }) => {
+          const target = menuItems.find(item => item.key === key)
+          if (target) navigate(target.path)
+          setNavOpen(false)
+        }}
+        style={{ borderInlineEnd: 'none' }}
+      />
+      <div className="app-theme-switch">
+        <Typography.Text type="secondary">外观</Typography.Text>
+        <Segmented
+          block
+          value={mode}
+          onChange={toggle}
+          data-testid="theme-toggle"
+          options={[
+            { value: 'day', icon: <SunOutlined />, label: '白天' },
+            { value: 'night', icon: <MoonOutlined />, label: '黑夜' },
+          ]}
+        />
+      </div>
+    </div>
+  )
+
   return (
-    // 锁定一屏高：内容区自己滚动，左侧栏（含外观切换）永远固定可见
-    <Layout style={{ height: '100vh', overflow: 'hidden', background: 'transparent' }}>
-      <Sider width={212} theme="light" className="app-sider">
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          {/* 顶部横幅：当前主题的风景插画 + 应用名 */}
-          <div className="app-banner">
-            <span className="app-banner-title">🌿 旅游规划助手</span>
-          </div>
-
-          <Menu
-            mode="inline"
-            selectedKeys={[selectedKey]}
-            style={{ borderInlineEnd: 'none', flex: 1, background: 'transparent' }}
-            items={[
-              { key: 'trips', icon: <CarryOutOutlined />, label: <Link to="/trips">我的行程</Link> },
-              { key: 'new', icon: <PlusCircleOutlined />, label: <Link to="/trips/new">新建行程</Link> },
-              { key: 'settings', icon: <SettingOutlined />, label: <Link to="/settings">个人设置</Link> },
-            ]}
-          />
-
-          {/* 外观切换：白天 = 明亮悠闲，黑夜 = 星夜月光。与菜单同屏、固定不滚动 */}
-          <div style={{ padding: '10px 14px 14px' }}>
-            <Divider style={{ margin: '0 0 10px' }} plain>
-              外观
-            </Divider>
-            <Segmented
-              block
-              value={mode}
-              onChange={toggle}
-              data-testid="theme-toggle"
-              options={[
-                { value: 'day', icon: <SunOutlined />, label: '白天' },
-                { value: 'night', icon: <MoonOutlined />, label: '黑夜' },
-              ]}
-            />
-          </div>
-        </div>
+    <Layout className="app-shell">
+      <Sider width={232} className="app-sider" theme={mode === 'night' ? 'dark' : 'light'}>
+        <div className="app-brand"><CompassOutlined className="app-brand-mark" />旅游规划助手</div>
+        {navigation}
       </Sider>
-
-      <Layout style={{ height: '100vh', background: 'transparent' }}>
+      <Layout className="app-main">
         <Header className="app-header">
-          <Space size={12}>
-            <UserAvatar avatar={me?.avatar} username={me?.username} size={32} />
-            <Typography.Text>{me?.username ?? '未登录'}</Typography.Text>
-            <Button size="small" onClick={handleLogout}>
-              退出登录
+          <div className="app-header-start">
+            <Button
+              className="app-menu-button"
+              type="text"
+              icon={<MenuOutlined />}
+              aria-label="打开导航"
+              title="打开导航"
+              onClick={() => setNavOpen(true)}
+            />
+            <span className="app-header-brand">旅游规划助手</span>
+          </div>
+          <Dropdown
+            trigger={['click']}
+            menu={{ items: [
+              { key: 'settings', icon: <SettingOutlined />, label: '个人设置', onClick: () => navigate('/settings') },
+              { type: 'divider' },
+              { key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout },
+            ] }}
+          >
+            <Button type="text" className="app-account-button" aria-label="账户菜单">
+              <Space size={8}>
+                <UserAvatar avatar={me?.avatar} username={me?.username} size={32} />
+                <span className="app-account-name">{me?.username ?? '账户'}</span>
+              </Space>
             </Button>
-          </Space>
+          </Dropdown>
         </Header>
-
-        {/* 只有这里滚动：左侧栏与顶栏固定。
-            行程详情页例外：那一页要「右侧地图钉住不动、只滚左侧每日安排」，
-            所以外层不滚，交给页面内部自己管。判断方式是最小改动且不依赖
-            全局状态——路径形如 /trips/xxx 且不是 /trips 或 /trips/new。 */}
-        <Content
-          style={{
-            overflowY: isTripDetailPage ? 'hidden' : 'auto',
-            padding: isTripDetailPage ? '20px 24px 16px' : '20px 24px 32px',
-            // 提前给滚动条预留 gutter：
-            //   antd 的 Select 等浮层打开时会锁 body 滚动（hidden overflow），
-            //   但很多浏览器在「已经从 hidden 切回 scroll」之间计算 scrollbar 占位不一致，
-            //   导致页面右侧多出 / 收回 16px，整页左右抖一下。
-            //   用 stable 提前把 gutter 留出来，浮层开关时滚动条的有无就不再影响布局。
-            scrollbarGutter: 'stable',
-          }}
-        >
+        <Content className="app-content">
           <Outlet />
         </Content>
       </Layout>
+      <Drawer
+        title="旅游规划助手"
+        placement="left"
+        size={288}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+        styles={{ body: { padding: 0 } }}
+      >
+        {navigation}
+      </Drawer>
     </Layout>
   )
 }

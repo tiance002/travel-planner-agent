@@ -1,4 +1,4 @@
-// 新建行程页 —— 四步向导。
+// 新建行程页 —— 三步向导。
 //
 // 向导流程：
 //   1. 基本信息：目的地（需解析成行政区划编码）、出发日期、天数、人数、偏好、预算、额外需求
@@ -7,7 +7,6 @@
 //   3. 生成行程：按天触发 AI 排布景点与餐厅，页面轮询显示逐天进度；
 //      某一天失败不影响已经排好的天，可以从断点继续。
 //      可选「逐天确认」（每排完一天暂停裁决）与「并行择优」（每天并排生成 2 套取优）
-//   4. 查看结果：时间轴与地图联动、到点打卡
 //
 // 为什么一定要先解析目的地：高德做 POI 检索和天气查询用的都是 6 位行政区划编码（adcode），
 // 只拿一个城市名是查不准的。解析动作同时把城市中心坐标取回来，用于地图初始视野。
@@ -57,11 +56,13 @@ import {
   getCompletedDayCount,
   getMissingDayIndexes,
   parseGenerationReview,
+  recoverGeneration,
   type GenerationReviewRequest,
   type GenerationRunPhase,
 } from '../api/trips'
 import AmapMap, { type MapMarker } from '../components/AmapMap'
-import { FormSection } from '../components/paper'
+import FormSection from '../components/FormSection'
+import GenerationStatusTag from '../components/GenerationStatusTag'
 
 /** 旅游偏好选项。定成枚举而不是自由文本，AI 的选点倾向才可控。
  *  下拉框用 tags 模式：既可以从这里选，也可以输入列表里没有的自定义偏好 */
@@ -564,6 +565,18 @@ export default function NewTrip() {
     }
   }
 
+  async function checkInterruptedGeneration() {
+    if (!savedTripId) return
+    try {
+      const result = await recoverGeneration(savedTripId)
+      await pollGeneration(savedTripId, pollTokenRef.current)
+      if (result.status === 'recovery') message.warning('任务已中断，取消后可安全补齐缺失日期')
+      else if (result.status === 'commit_pending') message.info('已生成安排仍在，可以重试保存')
+      else if (result.status === 'waiting') message.info('正在等待你的确认')
+      else if (result.status === 'active') message.info('任务仍在执行')
+    } catch (err) { message.error(extractError(err, '暂时无法检查生成状态')) }
+  }
+
   // 离开页面时清掉定时器，避免在后台空转
   useEffect(() => {
     return () => {
@@ -611,7 +624,7 @@ export default function NewTrip() {
   const commitPending = genRunPhase === 'commit_pending'
   // partial/failed 都没有正在执行的模型任务；即使服务端已经落库全部日期，
   // 也要保留幂等 continue 入口，让后端完成最后的收尾状态推进。
-  const canContinue = genStatus === 'failed' || genStatus === 'partial'
+  const canContinue = (genStatus === 'failed' || genStatus === 'partial') && genRunPhase !== 'recovery'
   const continueLabel = commitPending
     ? '重试保存已生成安排'
     : missingDayIndexes.length > 0
@@ -619,7 +632,7 @@ export default function NewTrip() {
       : '核对并完成行程'
 
   return (
-    <div style={{ maxWidth: 1080, margin: '0 auto' }}>
+    <div className="page-shell">
       <Typography.Title level={4} style={{ marginBottom: 16 }}>
         新建行程
       </Typography.Title>
@@ -628,10 +641,9 @@ export default function NewTrip() {
         <Steps
           current={current}
           items={[
-            { title: '基本信息', content: '目的地、日期、偏好与预算' },
-            { title: '选定住宿', content: '内嵌地图选点，或交给 AI 推荐中心区域' },
-            { title: '生成行程', content: 'AI 依据高德真实数据排布每日景点与餐厅' },
-            { title: '查看结果', content: '时间轴与地图联动、到点打卡' },
+            { title: '旅行信息' },
+            { title: '住宿安排' },
+            { title: '生成行程' },
           ]}
         />
       </Card>
@@ -639,18 +651,12 @@ export default function NewTrip() {
       {/* ---------------- 第一步：基本信息 ---------------- */}
       {current === 0 && (
         <Card
-          // 第一步字段多，纵向堆起来会超过一屏。这里把「表单」装进一个限高、
-          // 内部滚动的容器，把「下一步 / 取消」钉在滚动区外面：无论字段多长，
-          // 都不会把整页撑破，外层步骤条、顶栏、侧栏稳如泰山，滚动条被关在卡片里。
-          style={{ display: 'flex', flexDirection: 'column' }}
+          className="form-shell"
           styles={{ body: { display: 'flex', flexDirection: 'column', gap: 16 } }}
         >
           <div
             style={{
-              maxHeight: 'calc(100vh - 320px)',
-              overflowY: 'auto',
-              paddingRight: 16,
-              scrollbarGutter: 'stable',
+              minWidth: 0,
             }}
           >
           <Form
@@ -796,6 +802,7 @@ export default function NewTrip() {
       {/* ---------------- 第二步：选定住宿 ---------------- */}
       {current === 1 && (
         <Card
+          className="stay-card"
           title={`在 ${resolvedCity?.city ?? ''} 选择住宿锚点`}
           extra={
             <Radio.Group value={stayMode} onChange={(e) => setStayMode(e.target.value as StayMode)}>
@@ -861,11 +868,16 @@ export default function NewTrip() {
                       hotels.map((hotel) => {
                         const active = selectedHotel?.poiId === hotel.poiId
                         return (
-                          <div
+                          <button
                             key={hotel.poiId}
+                            type="button"
                             data-testid="hotel-item"
                             onClick={() => pickHotel(hotel)}
                             style={{
+                              display: 'block',
+                              width: '100%',
+                              textAlign: 'left',
+                              font: 'inherit',
                               padding: '10px 12px',
                               cursor: 'pointer',
                               borderRadius: token.borderRadius,
@@ -884,7 +896,7 @@ export default function NewTrip() {
                                 {hotel.cost !== null && ` · 人均 ¥${hotel.cost}`}
                               </Typography.Text>
                             </div>
-                          </div>
+                          </button>
                         )
                       })}
                   </div>
@@ -908,7 +920,7 @@ export default function NewTrip() {
             </Col>
 
             <Col xs={24} lg={14}>
-              <AmapMap
+              <div className="stay-map"><AmapMap
                 center={mapCenter}
                 zoom={mapZoom}
                 markers={stayMarkers}
@@ -916,8 +928,9 @@ export default function NewTrip() {
                   const hotel = hotels.find((item) => item.poiId === id)
                   if (hotel) pickHotel(hotel)
                 }}
-                height={520}
+                height="clamp(320px, 40vw, 520px)"
               />
+              </div>
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 地图上标出的是高德返回的真实地点，坐标直接来自高德开放平台的数据。
               </Typography.Text>
@@ -941,25 +954,7 @@ export default function NewTrip() {
           title="生成行程"
           extra={
             <span data-testid="gen-status">
-              {genStatus === 'ready' ? (
-                <Tag color="green">已生成</Tag>
-              ) : genStatus === 'generating' ? (
-                <Tag color={genRunPhase === 'waiting' || genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
-                  {genRunPhase === 'waiting'
-                    ? '等待确认'
-                    : genRunPhase === 'recovery'
-                      ? '需要恢复'
-                      : commitPending
-                        ? '保存待重试'
-                        : '生成中'}
-                </Tag>
-              ) : genStatus === 'partial' ? (
-                <Tag color="warning">部分完成</Tag>
-              ) : genStatus === 'failed' ? (
-                <Tag color="red">生成失败</Tag>
-              ) : (
-                <Tag>草稿</Tag>
-              )}
+              <GenerationStatusTag status={genStatus} phase={genRunPhase} />
             </span>
           }
         >
@@ -972,27 +967,31 @@ export default function NewTrip() {
               description="每日的景点、餐厅与通勤安排都已写入这条行程，可以到「我的行程」里查看。逐日时间轴、地图联动与到点打卡都已就绪。"
             />
           ) : (
-            <Alert
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-              title="点击下方按钮开始排程"
-              description={
-                <span>
-                  AI 会通过高德查询你目的地的景点、餐厅、天气与真实路线，再按这些规则排布：以住宿为锚点、
-                  每天游览类地点不超过 3 个（主题乐园整天、爬山这类行程只排 1 个）、餐厅插在相邻两个景点之间、
-                  相邻两点实际通勤超过 40 分钟就换点、有雨时优先室内场所。
-                  <br />
-                  <b>选点标准</b>：景点评分不低于 4 分，且营业时间要和安排的时段对得上
-                  （不会把 17:00 就关门的地方排到晚上）。如果某天体力消耗特别大，
-                  次日会自动排得轻松一些。生成后对某个地点不满意，可以在行程里点「换一个」，
-                  在可行距离内替换同类地点。
-                  <br />
-                  <b>按天生成</b>：每次只排一天，排完立刻存下来，进度会在这里推进。
-                  某一天失败也不必从头再来，已经排好的天都会保留。期间可以离开本页，生成在服务端继续。
-                </span>
-              }
-            />
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                title={doneDays > 0 ? `已保存 ${doneDays}/${totalDays} 天` : '行程已保存，准备生成'}
+                description={genRunPhase === 'waiting'
+                  ? '请先确认下方方案，系统会继续安排下一天。'
+                  : genRunPhase === 'recovery'
+                    ? '请检查中断状态，必要时取消未确认方案后补齐缺失日期。'
+                    : '按天安排并保存；离开页面后仍可在行程详情查看状态。'}
+              />
+              <Collapse
+                size="small"
+                style={{ marginBottom: 16 }}
+                items={[{ key: 'rules', label: '了解选点与生成规则', children: (
+                  <Typography.Paragraph style={{ marginBottom: 0 }}>
+                    AI 以住宿为锚点查询高德的景点、餐厅、天气与真实路线。每天游览类地点不超过 3 个，
+                    主题乐园或爬山通常只排 1 个；餐厅安排在相邻景点之间，通勤超过 40 分钟会换点，雨天优先室内。
+                    景点建议评分不低于 4 分，并核对营业时间；高强度行程后一天会安排得轻松一些。
+                    每次只生成并保存一天，已保存日期在失败后会保留。
+                  </Typography.Paragraph>
+                ) }]}
+              />
+            </>
           )}
 
           {/* 图版专属开关区。普通生成不受影响；勾选后才走 LangGraph 的增强能力 */}
@@ -1004,7 +1003,7 @@ export default function NewTrip() {
               marginBottom: 16,
               padding: '12px 16px',
               borderRadius: 8,
-              border: '1px dashed rgba(58, 50, 38, 0.25)',
+              border: `1px solid ${token.colorBorderSecondary}`,
             }}
           >
             <div>
@@ -1017,7 +1016,7 @@ export default function NewTrip() {
                 />
                 <Typography.Text strong>逐天人工确认</Typography.Text>
               </Space>
-              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 2, maxWidth: 300 }}>
+              <div style={{ fontSize: 13, color: token.colorTextSecondary, marginTop: 4, maxWidth: 300 }}>
                 每排完一天就暂停，展示当天摘要，等你确认后再排下一天（生成会从头开始）
               </div>
             </div>
@@ -1032,7 +1031,7 @@ export default function NewTrip() {
                 <Typography.Text strong>并行择优</Typography.Text>
                 {parallelEnabled && <Tag color="orange">消耗与耗时约翻倍</Tag>}
               </Space>
-              <div style={{ fontSize: 12, opacity: 0.72, marginTop: 2, maxWidth: 300 }}>
+              <div style={{ fontSize: 13, color: token.colorTextSecondary, marginTop: 4, maxWidth: 300 }}>
                 每天并行生成 2 套方案，按评分与通勤打分选最优再落库
               </div>
             </div>
@@ -1068,7 +1067,7 @@ export default function NewTrip() {
               {/* 双方案对比：优缺点与评分/通勤数据都来自已验证的高德数据，
                   不掺 AI 的主观形容，用户看到的是可复核的数字 */}
               {reviewRequest.kind === 'choose' && reviewRequest.candidates && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, margin: '10px 0' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: 12, margin: '10px 0' }}>
                   {reviewRequest.candidates.map((c) => (
                     <div
                       key={c.label}
@@ -1210,6 +1209,9 @@ export default function NewTrip() {
           )}
 
           <Space style={{ marginBottom: 16 }} wrap>
+            {savedTripId && (genStatus === 'generating' || commitPending) && (
+              <Button onClick={() => void checkInterruptedGeneration()} data-testid="newtrip-recover-check">检查中断状态</Button>
+            )}
             {canContinue && (
               <Button
                 type="primary"
@@ -1224,6 +1226,7 @@ export default function NewTrip() {
               type={canContinue ? 'default' : 'primary'}
               data-testid="generate-btn"
               loading={generating}
+              disabled={genStatus === 'generating' || genRunPhase === 'recovery'}
               onClick={() =>
                 void startGenerate(commitPending ? 'continue' : genStatus === 'ready' || doneDays > 0 ? 'restart' : 'continue')
               }
@@ -1332,9 +1335,7 @@ export default function NewTrip() {
             />
           )}
 
-          {/* 行程概览。早先用的是 Descriptions 带边框表格，视觉上像一张数据报表，
-              和旅游产品的气质不搭。改成「两列信息网格 + 胶囊标签」：
-              每条信息是一个独立小块，字段名在上、内容在下，扫起来更轻松 */}
+          <Collapse size="small" items={[{ key: 'details', label: '行程与天气详情', children: <>
           <div
             style={{
               display: 'grid',
@@ -1350,25 +1351,7 @@ export default function NewTrip() {
             </InfoBlock>
 
              <InfoBlock label="状态" token={token}>
-               {genStatus === 'ready' ? (
-                 <Tag color="green">已生成</Tag>
-               ) : genStatus === 'generating' ? (
-                 <Tag color={genRunPhase === 'waiting' || genRunPhase === 'recovery' || commitPending ? 'warning' : 'processing'}>
-                   {genRunPhase === 'waiting'
-                     ? '等待确认'
-                     : genRunPhase === 'recovery'
-                       ? '需要恢复'
-                       : commitPending
-                         ? '保存待重试'
-                         : '生成中'}
-                 </Tag>
-               ) : genStatus === 'partial' ? (
-                 <Tag color="warning">部分完成</Tag>
-               ) : genStatus === 'failed' ? (
-                 <Tag color="red">生成失败</Tag>
-               ) : (
-                <Tag>草稿</Tag>
-              )}
+               <GenerationStatusTag status={genStatus} phase={genRunPhase} />
             </InfoBlock>
 
             <InfoBlock label="目的地" token={token}>
@@ -1510,6 +1493,7 @@ export default function NewTrip() {
               )
             })}
           </div>
+          </> }]} />
 
           <Divider style={{ margin: '16px 0' }} />
 

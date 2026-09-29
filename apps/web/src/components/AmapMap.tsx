@@ -41,7 +41,7 @@ interface AmapMapProps {
   onMapClick?: (lng: number, lat: number) => void
   /** 标记或折线变化后是否自动缩放到全部可见 */
   fitToContent?: boolean
-  height?: number
+  height?: number | string
 }
 
 /** 把用户可见的文字转义，避免拼进 HTML 时破坏结构 */

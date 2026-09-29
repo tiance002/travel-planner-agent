@@ -21,6 +21,7 @@ import {
   Card,
   Input,
   Popconfirm,
+  Segmented,
   Select,
   Space,
   Tag,
@@ -47,7 +48,8 @@ import {
   type TestResult,
 } from '../api/settings'
 import UserAvatar from '../components/UserAvatar'
-import { FormSection } from '../components/paper'
+import FormSection from '../components/FormSection'
+import { useTheme } from '../theme'
 
 // 常见厂商预设。选中后自动带出接口地址与候选模型名，
 // 用户也可以全部手填（选择「自定义」即可）。
@@ -85,6 +87,7 @@ interface Notice {
 
 export default function Settings() {
   const { message } = App.useApp()
+  const { mode, toggle } = useTheme()
 
   // --- 账户设置状态 ---------------------------------------------------------
   const [me, setMe] = useState<MeInfo | null>(null)
@@ -300,6 +303,16 @@ export default function Settings() {
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
       <Typography.Title level={4}>个人设置</Typography.Title>
 
+      <Card title="外观" style={{ marginBottom: 16 }}>
+        <Field label="显示模式" hint="选择会立即应用到所有页面，下次打开仍会保留。">
+          <Segmented
+            value={mode}
+            onChange={toggle}
+            options={[{ value: 'day', label: '白天' }, { value: 'night', label: '黑夜' }]}
+          />
+        </Field>
+      </Card>
+
       {/* ---------------- 账户设置 ---------------- */}
       <Card
         title={
@@ -341,7 +354,7 @@ export default function Settings() {
             </div>
 
             <div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 44px)', gap: 8 }}>
+              <div className="avatar-options">
                 {PRESET_AVATARS.map((emoji) => {
                   const active = me?.avatar === `emoji:${emoji}`
                   return (
@@ -365,7 +378,7 @@ export default function Settings() {
 
         {/* 用户名 */}
         <Field center label="用户名" hint="3-32 位字母、数字或下划线。修改后当前登录凭证会自动换新，无需重新登录">
-          <Space.Compact style={{ width: 320 }}>
+          <Space.Compact style={{ width: 'min(320px, 100%)' }}>
             <Input
               data-testid="username-input"
               value={username}
@@ -476,20 +489,18 @@ export default function Settings() {
                 {activeProvider.models.map((item) => {
                   const active = modelName === item
                   return (
-                    <Tag
+                    <Button
                       key={item}
+                      size="small"
+                      type={active ? 'primary' : 'default'}
                       style={{
-                        cursor: 'pointer',
-                        marginInlineEnd: 0,
-                        padding: '3px 10px',
                         borderRadius: 999,
                       }}
-                      color={active ? 'blue' : undefined}
                       onClick={() => setModelName(item)}
                     >
                       {item}
                       {active ? ' ✓' : ''}
-                    </Tag>
+                    </Button>
                   )
                 })}
               </div>

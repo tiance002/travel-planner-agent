@@ -62,6 +62,7 @@ export interface TripDayData {
 export type GenerationRunPhase =
   | 'running'
   | 'waiting'
+  | 'reviewing'
   | 'recovery'
   | 'commit_pending'
   | null
@@ -212,6 +213,12 @@ export async function getTrip(id: string): Promise<TripDetailData> {
 /** 取消等待确认/人工恢复阶段的任务，保留已落库日期与打卡数据。 */
 export async function cancelGeneration(tripId: string): Promise<void> {
   await api.post(`/trips/${tripId}/cancel-generation`)
+}
+
+/** 显式检查异常中断，不在普通详情 GET 中改变运行状态。 */
+export async function recoverGeneration(tripId: string): Promise<{ status: 'active' | 'waiting' | 'recovery' | 'commit_pending' | 'idle'; changed: boolean }> {
+  const { data } = await api.post<{ status: 'active' | 'waiting' | 'recovery' | 'commit_pending' | 'idle'; changed: boolean }>(`/trips/${tripId}/recover-generation`)
+  return data
 }
 
 /** 从已有行程复制基础配置为新草稿，供安全的重新规划使用。 */

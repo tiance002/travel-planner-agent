@@ -10,7 +10,7 @@ import { prisma } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { poiFromStay, poiFromTripItem } from '../domain/poi-mapper'
 import { generateTripWithGraph, prepareTripReview, resumeTripReview } from '../services/agent/graph-run'
-import { acquireRun, releaseRun, cancelSuspendedRun } from '../services/agent/run-lock'
+import { acquireRun, releaseRun, cancelSuspendedRun, recoverStaleRun } from '../services/agent/run-lock'
 import { findAlternatives } from '../services/agent/alternatives'
 import { nightKindOfText, parseDayTypeBan, type NightKind } from '../services/agent/spot-rules'
 import { searchPoiById } from '../services/amap'
@@ -108,6 +108,7 @@ tripsRouter.get('/', async (req, res, next) => {
         days: true,
         travelers: true,
         status: true,
+        genRunPhase: true,
         stayResolved: true,
         stayName: true,
         createdAt: true,
@@ -514,6 +515,18 @@ tripsRouter.post('/:id/cancel-generation', async (req, res, next) => {
       return
     }
     res.json({ ok: true })
+  } catch (error) { next(error) }
+})
+
+// 详情页显式触发的恢复检查。GET 详情保持只读，避免打开页面就改变任务归属。
+tripsRouter.post('/:id/recover-generation', async (req, res, next) => {
+  try {
+    const result = await recoverStaleRun(req.params.id, req.user!.userId)
+    if (!result.found) {
+      res.status(404).json({ error: '行程不存在' })
+      return
+    }
+    res.json({ ok: true, status: result.status, changed: result.changed })
   } catch (error) { next(error) }
 })
 

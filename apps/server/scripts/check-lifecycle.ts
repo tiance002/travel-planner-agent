@@ -1053,6 +1053,126 @@ async function testMalformedCommitPendingIsRecoveryOnly(): Promise<void> {
   }
 }
 
+async function testExplicitRecoveryEndpoint(): Promise<void> {
+  console.log('\n--- A1：详情页显式恢复检查区分活跃、waiting 与过期任务 ---')
+  const user = await makeUser('explicit-recovery')
+  const trip = await makeTrip(user.id, 1, 'explicit-recovery')
+  const { runtime } = makeRuntime({ tag: 'explicit-recovery' })
+  const http = await serve(runtime, user.token)
+  try {
+    const activeRun = await markOwnedGenerating(trip.id, user.id)
+    await prisma.trip.update({ where: { id: trip.id }, data: { genHeartbeatAt: new Date() } })
+    const active = await http.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    check('活跃任务恢复检查不抢占', active.status, 200)
+    const activeBody = await active.json() as { status: string; changed: boolean }
+    check('活跃任务返回 active', [activeBody.status, activeBody.changed], ['active', false])
+    await releaseRun(trip.id, activeRun)
+
+    const waitingRun = await markOwnedGenerating(trip.id, user.id)
+    await prisma.trip.update({ where: { id: trip.id }, data: { genRunPhase: 'waiting', genReviewId: randomUUID(), genReview: JSON.stringify({ kind: 'confirm', dayIndex: 1, totalDays: 1, summary: '待确认' }) } })
+    const waiting = await http.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    check('waiting 任务恢复检查不按 TTL 清理', waiting.status, 200)
+    const waitingBody = await waiting.json() as { status: string; changed: boolean }
+    check('waiting 任务保持 waiting', [waitingBody.status, waitingBody.changed], ['waiting', false])
+    await prisma.trip.update({ where: { id: trip.id }, data: { genRunId: waitingRun, genActiveUserId: user.id, genRunPhase: 'running', genReview: null, genReviewId: null, genHeartbeatAt: new Date(Date.now() - HEARTBEAT_TTL_MS * 2) } })
+
+    const stale = await http.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    check('过期任务恢复检查返回成功', stale.status, 200)
+    const staleBody = await stale.json() as { status: string; changed: boolean }
+    check('过期任务原子转 recovery', [staleBody.status, staleBody.changed], ['recovery', true])
+    const row = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, select: { genRunId: true, genRunPhase: true } })
+    check('过期任务释放运行归属', [row.genRunId, row.genRunPhase], [null, 'recovery'])
+
+    // 无持有者时即使旧心跳时间尚新，也没有活任务可保护。
+    await prisma.trip.update({ where: { id: trip.id }, data: {
+      status: 'generating', genRunId: null, genActiveUserId: null,
+      genRunPhase: 'running', genHeartbeatAt: new Date(),
+    } })
+    const orphan = await http.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    const orphanBody = await orphan.json() as { status: string; changed: boolean }
+    check('无运行者的 generating 即刻进入 recovery', [orphan.status, orphanBody.status, orphanBody.changed], [200, 'recovery', true])
+    const orphanRow = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, select: { genRunPhase: true, genHeartbeatAt: true } })
+    check('无运行者恢复清理残留心跳', [orphanRow.genRunPhase, orphanRow.genHeartbeatAt], ['recovery', null])
+  } finally { await closeServer(http.server) }
+}
+
+async function testStrictMalformedPendingItems(): Promise<void> {
+  console.log('\n--- A2：pending journal 的空 item 必须进入 recovery ---')
+  const user = await makeUser('malformed-item')
+  const trip = await makeTrip(user.id, 2, 'malformed-item')
+  const malformed = { kind: 'commit_pending', dayIndex: 2, totalDays: 2, warnings: [], day: {
+    dayIndex: 2, summary: '不完整方案', dayType: 'normal', intensity: 'medium', items: [{}],
+  } }
+  await prisma.trip.update({ where: { id: trip.id }, data: { status: 'failed', genRunPhase: 'commit_pending', genReviewId: randomUUID(), genReview: JSON.stringify(malformed), genRunConfig: JSON.stringify({ pendingCommit: malformed }) } })
+  const { runtime, calls } = makeRuntime({ tag: 'malformed-item' })
+  const http = await serve(runtime, user.token)
+  try {
+    const response = await http.request(`/api/trips/${trip.id}/generate`, { method: 'POST', body: JSON.stringify({ mode: 'continue' }) })
+    check('空 item journal 不会启动生成', response.status, 409)
+    const row = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, select: { genRunId: true, genRunPhase: true, genError: true } })
+    check('空 item journal 转 recovery', [row.genRunId, row.genRunPhase, /损坏/.test(row.genError ?? '')], [null, 'recovery', true])
+    check('空 item journal 不调用模型', calls(), 0)
+  } finally { await closeServer(http.server) }
+}
+
+async function testRecoveryConcurrencyAndOwnership(): Promise<void> {
+  console.log('\n--- A1：并发恢复与跨用户归属 ---')
+  const user = await makeUser('recovery-owner')
+  const other = await makeUser('recovery-other')
+  const trip = await makeTrip(user.id, 2, 'recovery-owner')
+  await seedDay(trip.id, 1, '已保存第1天', { checked: true })
+  const oldRun = randomUUID()
+  await prisma.trip.update({ where: { id: trip.id }, data: { status: 'generating', genRunId: oldRun,
+    genActiveUserId: user.id, genRunPhase: 'reviewing', genHeartbeatAt: new Date(Date.now() - HEARTBEAT_TTL_MS * 2),
+    genReviewId: randomUUID(), genReview: JSON.stringify({ kind: 'confirm', dayIndex: 2, totalDays: 2, summary: '旧候选' }) } })
+  const { runtime } = makeRuntime({ tag: 'recovery-owner' })
+  const ownHttp = await serve(runtime, user.token)
+  const otherHttp = await serve(runtime, other.token)
+  try {
+    const forbidden = await otherHttp.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    check('其他用户不能恢复该行程', forbidden.status, 404)
+    const responses = await Promise.all([ownHttp.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' }),
+      ownHttp.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })])
+    check('并发恢复请求都返回可读结果', responses.map(response => response.status), [200, 200])
+    const bodies = await Promise.all(responses.map(response => response.json() as Promise<{ status: string; changed: boolean }>))
+    check('并发恢复只推进一次', bodies.filter(body => body.changed).length, 1)
+    const recovered = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, include: { tripDays: { include: { items: true } } } })
+    check('过期 reviewing 保留原裁决和落库数据', [recovered.genRunPhase, recovered.genRunId, recovered.genReview !== null,
+      recovered.tripDays[0]?.summary, recovered.tripDays[0]?.items[0]?.checkedAt !== null],
+    ['recovery', null, true, '已保存第1天', true])
+    const cancelled = await ownHttp.request(`/api/trips/${trip.id}/cancel-generation`, { method: 'POST', body: '{}' })
+    check('恢复后可以安全取消', cancelled.status, 200)
+    const after = await prisma.trip.findUniqueOrThrow({ where: { id: trip.id }, include: { tripDays: { include: { items: true } } } })
+    check('取消保留日期和打卡', [after.status, after.tripDays[0]?.summary, after.tripDays[0]?.items[0]?.checkedAt !== null],
+      ['partial', '已保存第1天', true])
+  } finally { await closeServer(ownHttp.server); await closeServer(otherHttp.server) }
+}
+
+async function testRecoverPendingJournalConflict(): Promise<void> {
+  console.log('\n--- A2：两份 journal 冲突时只允许人工恢复 ---')
+  const user = await makeUser('journal-conflict')
+  const trip = await makeTrip(user.id, 2, 'journal-conflict')
+  const item = { poiId: 'TEST-POI', name: '测试地点', lng: 120.15, lat: 30.28, address: '杭州', tel: '',
+    rating: null, cost: null, tag: '', openTimeText: '', itemType: 'spot', slot: 'morning', note: '',
+    orderIndex: 1, typecode: '110101', commuteMinutes: null, photos: [] }
+  const payload = { kind: 'commit_pending', dayIndex: 1, totalDays: 2, warnings: [],
+    day: { dayIndex: 1, summary: '原方案', dayType: 'normal', intensity: 'medium', items: [item] } }
+  const conflict = { ...payload, day: { ...payload.day, summary: '冲突方案' } }
+  await prisma.trip.update({ where: { id: trip.id }, data: { status: 'failed', genRunPhase: 'commit_pending',
+    genReview: JSON.stringify(payload), genRunConfig: JSON.stringify({ pendingCommit: conflict }) } })
+  const { runtime, calls } = makeRuntime({ tag: 'journal-conflict' })
+  const http = await serve(runtime, user.token)
+  try {
+    const result = await http.request(`/api/trips/${trip.id}/recover-generation`, { method: 'POST', body: '{}' })
+    check('冲突 journal 恢复检查响应', result.status, 200)
+    const body = await result.json() as { status: string; changed: boolean }
+    check('冲突 journal 转 recovery', [body.status, body.changed], ['recovery', true])
+    const generate = await http.request(`/api/trips/${trip.id}/generate`, { method: 'POST', body: JSON.stringify({ mode: 'continue' }) })
+    check('冲突 journal 不允许自动继续', generate.status, 409)
+    check('冲突 journal 不调用模型', calls(), 0)
+  } finally { await closeServer(http.server) }
+}
+
 async function testReviewIdRequiredAndStaleIdRejected(): Promise<void> {
   console.log('\n--- P1：reviewId 必填且旧卡 id 不能裁决新卡 ---')
   const user = await makeUser('review-id')
@@ -1180,6 +1300,10 @@ async function run(): Promise<void> {
     await testPendingJournalWriteFailureDoesNotRetryModel()
     await testInteractiveCommitFailureJournalsChosenCandidate()
     await testMalformedCommitPendingIsRecoveryOnly()
+    await testExplicitRecoveryEndpoint()
+    await testStrictMalformedPendingItems()
+    await testRecoveryConcurrencyAndOwnership()
+    await testRecoverPendingJournalConflict()
     await testReviewIdRequiredAndStaleIdRejected()
     await testRecoveryCanBeCancelled()
     await testCrashedRunningReviewBecomesRecoverable()
